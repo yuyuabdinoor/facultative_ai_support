@@ -7,10 +7,28 @@ in the facultative reinsurance system.
 
 import logging
 from typing import Dict, Any, Optional
-from celery import Celery
 from pathlib import Path
 
-from app.celery import celery_app
+try:
+    from celery import Celery
+    from app.celery import celery_app
+    CELERY_AVAILABLE = True
+except ImportError:
+    # Celery not available, define dummy objects
+    Celery = None
+    celery_app = None
+    CELERY_AVAILABLE = False
+
+# Create a decorator that works with or without Celery
+def celery_task(*args, **kwargs):
+    """Decorator that works whether Celery is available or not"""
+    def decorator(func):
+        if CELERY_AVAILABLE and celery_app is not None:
+            return celery_app.task(*args, **kwargs)(func)
+        else:
+            # Return the function as-is if Celery is not available
+            return func
+    return decorator
 from app.agents.ocr_agent import ocr_agent, OCRResult, EmailContent, ExcelData
 from app.models.database import Document
 from app.core.database import get_db
@@ -19,7 +37,14 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, max_retries=3)
+def _celery_task_decorator(func):
+    """Conditional celery task decorator"""
+    if CELERY_AVAILABLE and celery_app:
+        return celery_app.task(bind=True, max_retries=3)(func)
+    else:
+        return func
+
+@_celery_task_decorator
 def process_document_ocr(self, document_id: str, file_path: str, document_type: Optional[str] = None) -> Dict[str, Any]:
     """
     Asynchronous task to process document OCR
@@ -134,7 +159,7 @@ def process_document_ocr(self, document_id: str, file_path: str, document_type: 
         }
 
 
-@celery_app.task(bind=True, max_retries=3)
+@celery_task(bind=True, max_retries=3)
 def process_pdf_ocr(self, document_id: str, file_path: str) -> Dict[str, Any]:
     """
     Specific task for PDF OCR processing
@@ -200,7 +225,7 @@ def process_pdf_ocr(self, document_id: str, file_path: str) -> Dict[str, Any]:
         }
 
 
-@celery_app.task(bind=True, max_retries=3)
+@celery_task(bind=True, max_retries=3)
 def process_email_parsing(self, document_id: str, file_path: str) -> Dict[str, Any]:
     """
     Specific task for email parsing
@@ -260,7 +285,7 @@ def process_email_parsing(self, document_id: str, file_path: str) -> Dict[str, A
         }
 
 
-@celery_app.task(bind=True, max_retries=3)
+@celery_task(bind=True, max_retries=3)
 def process_excel_parsing(self, document_id: str, file_path: str) -> Dict[str, Any]:
     """
     Specific task for Excel file processing
@@ -316,7 +341,7 @@ def process_excel_parsing(self, document_id: str, file_path: str) -> Dict[str, A
         }
 
 
-@celery_app.task
+@celery_task
 def batch_process_documents(document_ids: list) -> Dict[str, Any]:
     """
     Process multiple documents in batch

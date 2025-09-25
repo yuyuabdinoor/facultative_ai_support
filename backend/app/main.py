@@ -2,7 +2,7 @@
 FastAPI main application entry point
 """
 # Import compatibility patch first to fix Python 3.12+ collections issues
-from . import compat_patch
+from . import compat_startup
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

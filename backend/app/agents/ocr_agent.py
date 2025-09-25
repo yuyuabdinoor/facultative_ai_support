@@ -21,10 +21,19 @@ import base64
 import pandas as pd
 import numpy as np
 from PIL import Image
-import fitz  # PyMuPDF for better PDF handling
+try:
+    import fitz  # PyMuPDF for better PDF handling
+except ImportError:
+    fitz = None  # Fallback if PyMuPDF is not available
 import pdfplumber
-from doctr.io import DocumentFile
-from doctr.models import ocr_predictor
+try:
+    from doctr.io import DocumentFile
+    from doctr.models import ocr_predictor
+    DOCTR_AVAILABLE = True
+except ImportError:
+    DocumentFile = None
+    ocr_predictor = None
+    DOCTR_AVAILABLE = False
 import extract_msg
 from openpyxl import load_workbook
 
@@ -87,8 +96,12 @@ class OCRProcessingAgent:
     def _initialize_ocr_model(self):
         """Initialize DOCTR OCR model"""
         try:
-            # Initialize DOCTR OCR predictor
-            self.ocr_model = ocr_predictor(pretrained=True)
+            if DOCTR_AVAILABLE:
+                # Initialize DOCTR OCR predictor
+                self.ocr_model = ocr_predictor(pretrained=True)
+            else:
+                self.ocr_model = None
+                print("Warning: DOCTR not available, OCR functionality will be limited")
             logger.info("DOCTR OCR model initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize OCR model: {str(e)}")
@@ -175,8 +188,8 @@ class OCRProcessingAgent:
         start_time = datetime.now()
         
         try:
-            if not self.ocr_model:
-                raise Exception("OCR model not initialized")
+            if not self.ocr_model or not DOCTR_AVAILABLE:
+                raise Exception("OCR model not initialized or DOCTR not available")
             
             # Load document with DOCTR
             doc = DocumentFile.from_pdf(file_path)
@@ -381,8 +394,8 @@ class OCRProcessingAgent:
             List of TextRegion objects with detected text
         """
         try:
-            if not self.ocr_model:
-                raise Exception("OCR model not initialized")
+            if not self.ocr_model or not DOCTR_AVAILABLE:
+                raise Exception("OCR model not initialized or DOCTR not available")
             
             # Handle different input types
             if isinstance(image, str):

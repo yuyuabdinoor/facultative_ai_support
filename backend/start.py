@@ -1,29 +1,41 @@
 #!/usr/bin/env python3
 """
-Startup script that applies compatibility patches before starting the FastAPI application.
+Startup script for the FastAPI application with Python 3.12+ compatibility fixes
 """
 
-# Apply compatibility patch first
+# Apply compatibility patches before importing any other modules
 import sys
 import collections
 import collections.abc
 
-# Patch collections module to include Sequence for backward compatibility
-if not hasattr(collections, 'Sequence'):
-    collections.Sequence = collections.abc.Sequence
-    collections.Mapping = collections.abc.Mapping
-    collections.MutableMapping = collections.abc.MutableMapping
-    collections.Iterable = collections.abc.Iterable
-    collections.Iterator = collections.abc.Iterator
-    collections.Callable = collections.abc.Callable
-    print("Applied Python 3.12+ collections compatibility patch")
+# Fix for Python 3.12+ where collections.Sequence was moved to collections.abc
+if sys.version_info >= (3, 10):
+    # Patch collections module to include items that were moved to collections.abc
+    if not hasattr(collections, 'Sequence'):
+        collections.Sequence = collections.abc.Sequence
+    if not hasattr(collections, 'Mapping'):
+        collections.Mapping = collections.abc.Mapping
+    if not hasattr(collections, 'MutableMapping'):
+        collections.MutableMapping = collections.abc.MutableMapping
+    if not hasattr(collections, 'Iterable'):
+        collections.Iterable = collections.abc.Iterable
+    if not hasattr(collections, 'Iterator'):
+        collections.Iterator = collections.abc.Iterator
+    if not hasattr(collections, 'Callable'):
+        collections.Callable = collections.abc.Callable
+    if not hasattr(collections, 'Set'):
+        collections.Set = collections.abc.Set
+    if not hasattr(collections, 'MutableSet'):
+        collections.MutableSet = collections.abc.MutableSet
 
-# Now start uvicorn
+# Now import uvicorn and run the application
+import uvicorn
+
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True
+        reload=True,
+        log_level="info"
     )

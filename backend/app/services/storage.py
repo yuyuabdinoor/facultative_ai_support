@@ -46,7 +46,13 @@ class LocalFileSystemStorage(StorageBackend):
     
     def __init__(self, base_path: str = "./uploads"):
         self.base_path = Path(base_path)
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        # Handle Python 3.12+ pathlib compatibility
+        try:
+            self.base_path.mkdir(parents=True, exist_ok=True)
+        except TypeError:
+            # Fallback for older pathlib versions
+            import os
+            os.makedirs(str(self.base_path), exist_ok=True)
     
     def _get_full_path(self, file_path: str) -> Path:
         """Get full filesystem path"""
