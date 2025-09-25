@@ -1,0 +1,39 @@
+# Dockerfile for local development
+FROM python:3.12.4-slim
+
+# Install system dependencies needed for Python packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libpq-dev \
+    libmagic1 \
+    libmagic-dev \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Install minimal requirements as fallback (in case venv mount fails)
+RUN pip install --no-cache-dir uvicorn[standard] fastapi celery redis
+
+# Copy the entire venv from host (will be mounted as volume)
+# This allows us to use pre-installed packages from the host
+
+# Copy application code
+COPY . .
+
+# Create uploads directory
+RUN mkdir -p uploads
+
+# Set up virtual environment path
+ENV VIRTUAL_ENV=/app/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8000
+
+# Default command for development with hot reload
+# Use the venv's python if available, otherwise fall back to system python
+CMD ["sh", "-c", "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python start.py; else python start.py; fi"]
