@@ -15,7 +15,7 @@
   - Write unit tests for data model validation and database operations
   - _Requirements: 2.2, 2.6, 10.2_
 
-- [ ] 3. Build document upload and storage service
+- [x] 3. Build document upload and storage service
   - Implement FastAPI endpoints for file upload with multi-format support
   - Add file validation, virus scanning, and metadata extraction
   - Create file storage abstraction layer (local filesystem and S3-compatible)
@@ -24,7 +24,7 @@
   - Write integration tests for upload workflows
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.6_
 
-- [ ] 4. Develop OCR processing agent with DOCTR integration
+- [-] 4. Develop OCR processing agent with DOCTR integration
   - Set up DOCTR library for image-based OCR processing
   - Implement PDF text extraction using PyPDF2 or pdfplumber
   - Create email parsing functionality for .msg files using python-msg-extractor
@@ -34,7 +34,7 @@
   - Write comprehensive tests for all document types
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 6.1, 6.3_
 
-- [ ] 5. Create data extraction agent with Hugging Face models
+- [x] 5. Create data extraction agent with Hugging Face models
   - Initialize and configure NER models (dbmdz/bert-large-cased-finetuned-conll03-english)
   - Implement financial entity extraction using ProsusAI/finbert
   - Add document layout analysis with microsoft/layoutlmv3-base
