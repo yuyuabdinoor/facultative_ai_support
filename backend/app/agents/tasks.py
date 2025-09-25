@@ -7,12 +7,13 @@ in the facultative reinsurance system.
 
 import logging
 from typing import Dict, Any, Optional
-from celery import Celery
+from celery import Celery, Task
 from pathlib import Path
+from transformers import pipeline
 
 from app.celery import celery_app
 from app.agents.ocr_agent import ocr_agent, OCRResult, EmailContent, ExcelData
-from app.models.database import Document
+from app.models import Document
 from app.core.database import get_db
 from sqlalchemy.orm import Session
 
@@ -362,3 +363,71 @@ def batch_process_documents(document_ids: list) -> Dict[str, Any]:
         'total_documents': len(document_ids),
         'results': results
     }
+
+
+class ExtractionTask(Task):
+    abstract = True
+    
+    def __init__(self):
+        super().__init__()
+        self.ner_pipeline = None
+        self.classifier = None
+    
+    def __call__(self, *args, **kwargs):
+        if not self.ner_pipeline:
+            self.ner_pipeline = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+        if not self.classifier:
+            self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+        return super().__call__(*args, **kwargs)
+
+@celery_app.task(base=ExtractionTask)
+def extract_and_analyze(text_data: str) -> Dict[str, Any]:
+    """Extract and analyze facultative reinsurance data"""
+    
+    # Mock extraction results
+    extracted_data = {
+        "risk_details": {
+            "insured": {
+                "name": "ABC Manufacturing Ltd",
+                "industry": "Manufacturing",
+                "climate_risk": "Medium",
+                "confidence": 0.92
+            },
+            "coverage": {
+                "perils": ["Fire", "Machinery Breakdown"],
+                "sum_insured": 25000000,
+                "currency": "USD",
+                "period": "01/01/2024 - 31/12/2024",
+                "confidence": 0.88
+            },
+            "location": {
+                "country": "Kenya",
+                "city": "Nairobi",
+                "specific": "Industrial Area",
+                "cat_exposure": {
+                    "earthquake": "Low",
+                    "flood": "Medium"
+                },
+                "confidence": 0.95
+            }
+        },
+        "analysis": {
+            "risk_assessment": {
+                "technical_score": 75,
+                "esg_rating": "Medium",
+                "climate_impact": "Moderate",
+                "confidence": 0.85
+            },
+            "recommendations": {
+                "accept": True,
+                "max_share": "25%",
+                "conditions": [
+                    "Install fire suppression system",
+                    "Regular machinery maintenance"
+                ],
+                "confidence": 0.82
+            }
+        }
+    }
+    
+    return extracted_data

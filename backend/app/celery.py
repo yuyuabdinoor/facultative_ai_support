@@ -25,3 +25,23 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     worker_max_tasks_per_child=1000,
 )
+
+# Add test configuration
+celery_app.conf.update(
+    task_always_eager=True,  # Run tasks synchronously for testing
+    task_eager_propagates=True,
+)
+
+@celery_app.task
+def test_extraction():
+    """Test task for extraction pipeline"""
+    from app.mock.sample_data import get_mock_email
+    from app.agents.tasks import extract_and_analyze
+    
+    # Get mock data
+    email_text = get_mock_email()
+    
+    # Run extraction
+    result = extract_and_analyze(email_text)
+    
+    return result
