@@ -1,0 +1,127 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: reinsurance_db
+    environment:
+      POSTGRES_DB: reinsurance
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - reinsurance_network
+
+  # Redis Cache and Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: reinsurance_redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - reinsurance_network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    container_name: reinsurance_backend
+    ports:
+      - "8005:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/reinsurance
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      # Mount the entire venv directory to use pre-installed packages
+      - ./backend/venv:/app/venv:ro
+    depends_on:
+      - db
+      - redis
+    networks:
+      - reinsurance_network
+
+  # Celery Worker
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    container_name: reinsurance_celery_worker
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/reinsurance
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      # Mount the entire venv directory to use pre-installed packages
+      - ./backend/venv:/app/venv:ro
+    depends_on:
+      - db
+      - redis
+    networks:
+      - reinsurance_network
+    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python -m celery -A app.celery worker --loglevel=info; else python -m celery -A app.celery worker --loglevel=info; fi"
+
+  # Celery Beat (Task Scheduler)
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    container_name: reinsurance_celery_beat
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/reinsurance
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend:/app
+      # Mount the entire venv directory to use pre-installed packages
+      - ./backend/venv:/app/venv:ro
+    depends_on:
+      - db
+      - redis
+    networks:
+      - reinsurance_network
+    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python -m celery -A app.celery beat --loglevel=info; else python -m celery -A app.celery beat --loglevel=info; fi"
+
+  # NextJS Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: reinsurance_frontend
+    ports:
+      - "3005:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      # Mount local node_modules to avoid reinstallation (similar to backend Python packages)
+      - ./frontend/node_modules:/app/node_modules:ro
+    depends_on:
+      - backend
+    networks:
+      - reinsurance_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  reinsurance_network:
+    driver: bridge

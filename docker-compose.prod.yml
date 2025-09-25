@@ -1,0 +1,59 @@
+services:
+  # FastAPI Backend with ML capabilities
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: reinsurance_backend_prod
+    ports:
+      - "8005:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/reinsurance
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      - db
+      - redis
+    networks:
+      - reinsurance_network
+
+  # Celery Worker with ML capabilities
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: reinsurance_celery_worker_prod
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/reinsurance
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      - db
+      - redis
+    networks:
+      - reinsurance_network
+    command: celery -A app.celery worker --loglevel=info
+
+  # Celery Beat
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: reinsurance_celery_beat_prod
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/reinsurance
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    networks:
+      - reinsurance_network
+    command: celery -A app.celery beat --loglevel=info

@@ -1,0 +1,43 @@
+# Docker Compose override for local development
+# Uses local Python environment to avoid reinstalling packages
+version: '3.8'
+
+services:
+  # FastAPI Backend with local Python environment
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      # Mount your local virtual environment packages
+      # Using the venv folder in the backend directory
+      - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
+    environment:
+      - PYTHONPATH=/app:/usr/local/lib/python3.12/site-packages
+
+  # Celery Worker with local Python environment
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
+    environment:
+      - PYTHONPATH=/app:/usr/local/lib/python3.12/site-packages
+    command: python -m celery -A app.celery worker --loglevel=info
+
+  # Celery Beat with local Python environment
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    volumes:
+      - ./backend:/app
+      - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
+    environment:
+      - PYTHONPATH=/app:/usr/local/lib/python3.12/site-packages
+    command: python -m celery -A app.celery beat --loglevel=info

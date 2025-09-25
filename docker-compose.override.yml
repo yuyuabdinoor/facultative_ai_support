@@ -1,0 +1,54 @@
+# Development overrides for docker-compose.yml
+# This file is automatically loaded by docker-compose for development
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      # Mount local virtual environment packages to avoid reinstallation
+      - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/usr/local/lib/python3.12/site-packages
+    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python run_server.py; else python run_server.py; fi"
+
+  frontend:
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      # Mount local virtual environment packages to avoid reinstallation
+      - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/usr/local/lib/python3.12/site-packages
+    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python run_celery_worker.py; else python run_celery_worker.py; fi"
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    volumes:
+      - ./backend:/app
+      # Mount local virtual environment packages to avoid reinstallation
+      - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/usr/local/lib/python3.12/site-packages
+    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python run_celery_beat.py; else python run_celery_beat.py; fi"
+    
