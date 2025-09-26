@@ -105,8 +105,8 @@ app.openapi = custom_openapi
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["*"],
     # During local development allow all headers (keeps CORS flexible for the frontend).
     # In production this should be restricted to required headers.
     allow_headers=["*"],
