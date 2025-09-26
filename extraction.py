@@ -13,6 +13,7 @@ try:
     import email
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
+
     HAS_EMAIL_LIBS = True
 except ImportError:
     HAS_EMAIL_LIBS = False
@@ -473,18 +474,27 @@ class EnhancedInformationExtractor:
         """Initialize with enhanced extraction patterns."""
         self.patterns = {
 
+            # 'insured': [
+            #     # More specific patterns to avoid grabbing policy text
+            #     r'(?:name\s*of\s*insured|insured\s*name|company\s*name)[\s:]+([A-Za-z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
+            #     r'(?:insured|assured|policyholder)[\s:]+([A-Z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
+            #     r'(?:client|customer|entity)[\s:]+([A-Z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
+            #     # Fallback for cases without clear labels
+            #     r'\b([A-Z][A-Za-z0-9\s&\-()]{10,100}(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)\b',
+            # ],
+
             'insured': [
-                # More specific patterns to avoid grabbing policy text
-                r'(?:name\s*of\s*insured|insured\s*name|company\s*name)[\s:]+([A-Za-z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
-                r'(?:insured|assured|policyholder)[\s:]+([A-Z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
-                r'(?:client|customer|entity)[\s:]+([A-Z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
-                # Fallback for cases without clear labels
-                r'\b([A-Z][A-Za-z0-9\s&\-()]{10,100}(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)\b',
+                # Direct patterns for company names
+                r'(?:name\s*of\s*insured|insured\s*name|insured|assured|policyholder)[\s:]+([A-Za-z][A-Za-z0-9\s\.,&\-()]*?(?:Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|S\.A\.E\.|Assurance).*?)(?=\s*(?:\n|accepts|excludes|warranties|private\s*limited))',
+                r'(?:company|entity|client)[\s:]+([A-Za-z][A-Za-z0-9\s\.,&\-()]*?(?:Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|S\.A\.E\.|Assurance).*?)(?=\s*(?:\n|accepts|excludes))',
+                # Catch standalone company names with indicators
+                r'\b([A-Za-z][A-Za-z0-9\s&\-()]{5,80}(?:\s+(?:Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|S\.A\.E\.|Assurance)))\b',
             ],
+
             'cedant': [
-                r'(?:cedant|ceding\s*company|ceding\s*insurer)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,150})["\']?',
-                r'(?:direct\s*insurer|primary\s*insurer|original\s*insurer)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,150})["\']?',
-                r'(?:fronting\s*company|local\s*insurer)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,150})["\']?',
+                r'(?:cedant|ceding\s*company|ceding\s*insurer|direct\s*insurer)[\s:]+([A-Za-z][A-Za-z0-9\s\.,&\-()]*?(?:Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|S\.A\.E\.|Assurance).*?)(?=\s*(?:\n|accepts))',
+                # Look for insurance company names
+                r'\b([A-Za-z][A-Za-z0-9\s&\-()]{5,80}(?:\s+(?:Insurance|Assurance))(?:\s+(?:Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|S\.A\.E\.))?)\b',
             ],
             'broker': [
                 r'(?:broker|brokerage|intermediary)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,150})["\']?',
@@ -500,6 +510,70 @@ class EnhancedInformationExtractor:
                 r'((?:USD|US\$|\$|EUR|€|GBP|£|KES|KSh|AED|SAR|ZAR)[\s]*[0-9,.\s]+(?:million|billion|thousand|m|b|k)?)',
                 r'([0-9,.\s]+(?:million|billion|thousand|m|b|k)?[\s]*(?:USD|US\$|\$|EUR|€|GBP|£|KES|KSh|AED|SAR|ZAR))',
             ],
+            # 'risk_surveyor_report': [
+            #     r'(?:surveyor|survey|inspection|risk\s*survey)[\s]*(?:report)?[\s:]*([^,\n\r;]{20,500})',
+            #     r'(?:technical\s*survey|engineering\s*report|site\s*inspection)[\s:]*([^,\n\r;]{20,500})',
+            #     r'(?:recommendations|findings|observations)[\s:]*([^,\n\r;]{20,500})',
+            #     r'(?:fire\s*protection|safety\s*measures|security\s*arrangements)[\s:]*([^,\n\r;]{20,500})',
+            #     r'(?:housekeeping|maintenance|construction\s*quality)[\s:]*([^,\n\r;]{20,500})',
+            # ],
+
+            'risk_surveyor_report': [
+                # Pattern to capture report names/titles
+                r'(?:surveyor[\'s]*\s*report|survey\s*report|inspection\s*report|technical\s*survey|risk\s*survey)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\-_\.\/()]{5,150})["\']?',
+                r'(?:report\s*by|surveyed\s*by|inspected\s*by)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s&\-_\.\/()]{5,100})["\']?',
+                # Capture report file names
+                r'(?:survey|inspection|technical)[\s_\-]*(?:report|assessment)[\s]*[:\-]?[\s]*([A-Za-z0-9][A-Za-z0-9\s\-_\.\/()]{5,80}\.(?:pdf|doc|docx|txt))',
+                # Capture surveyor company names
+                r'(?:risk\s*management|engineering\s*consultant|surveyor|inspection\s*company)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s&\-_\.\/()]{10,100})["\']?',
+                # Generic report reference patterns
+                r'(?:as\s*per|according\s*to|reference)[\s]*(?:the\s*)?(?:survey|inspection|technical\s*report)[\s:]*["\']?([A-Za-z0-9][A-Za-z0-9\s\-_\.\/()]{5,80})["\']?',
+                # Date-based report references
+                r'(?:survey|inspection|report)[\s]*(?:dated|on|of)[\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+            ],
+            'inward_acceptances': [
+                r'(?:inward\s*acceptance|inward\s*business|treaty\s*acceptance)[\s:]*([^,\n\r;]{10,200})',
+                r'(?:accepted\s*from|received\s*from|ceded\s*by)[\s:]*([^,\n\r;]{10,200})',
+                r'(?:participating\s*companies|co-insurers|consortium)[\s:]*([^,\n\r;]{10,200})',
+            ],
+
+            'share_offered': [
+                r'(?:share\s*offered|percentage\s*offered|participation\s*sought)[\s:]*([0-9]+(?:\.[0-9]+)?%?)',
+                r'(?:seeking|looking\s*for|require)[\s:]*([0-9]+(?:\.[0-9]+)?%?)[\s]*(?:share|participation)',
+                r'(?:quota\s*share|surplus|percentage)[\s:]*([0-9]+(?:\.[0-9]+)?%?)',
+                r'([0-9]+(?:\.[0-9]+)?%?)[\s]*(?:of|share|participation|quota)',
+                r'(?:line\s*capacity|our\s*share|participation)[\s:]*([0-9]+(?:\.[0-9]+)?%?)',
+            ],
+            'claims_experience': [
+                # Enhanced patterns for comprehensive claims data
+                # Year-wise claims with amounts
+                r'(20[0-9]{2}[\s]*[-:][\s]*(?:USD|EUR|GBP|INR|KES|AED|SAR|CAD|AUD|\$|â‚¬|Â£)?\s*[0-9,.\s]*(?:million|thousand|m|k)?[^,\n\r;\.]{0,100})',
+
+                # Detailed loss ratios and frequencies
+                r'((?:loss|combined|claims?)\s*ratio[\s:]*[0-9]+(?:\.[0-9]+)?%?[^,\n\r;\.]{0,150})',
+                r'((?:frequency|severity)\s*(?:of\s*)?(?:claims?|losses?)[\s:]*[^,\n\r;\.]{10,200})',
+
+                # Claims-free periods with specificity
+                r'((?:[0-9]+\s*years?|last\s*[0-9]+\s*years?|since\s*[0-9]{4})\s*(?:claims?\s*free|no\s*claims?|nil\s*losses?|claims?\s*free\s*period)[^,\n\r;\.]{0,100})',
+
+                # Major/minor claims classification
+                r'((?:major|minor|significant|small)\s*(?:claims?|losses?)[\s:]*[^,\n\r;\.]{10,200})',
+
+                # Well below/above average references
+                r'((?:well\s*below|above|below)\s*(?:average|industry|market)[\s]*(?:claims?|losses?|experience)[^,\n\r;\.]{0,150})',
+
+                # Specific incident descriptions
+                r'((?:incident|claim|loss)\s*(?:related\s*to|due\s*to|from)[\s]*[^,\n\r;\.]{15,300})',
+
+                # Recovery and settlement information
+                r'((?:recovered|settlement|paid|outstanding)[\s:]*(?:USD|EUR|GBP|INR|KES|AED|SAR|CAD|AUD|\$|â‚¬|Â£)?\s*[0-9,.\s]*(?:million|thousand|m|k)?[^,\n\r;\.]{0,100})',
+
+                # Comprehensive 3-year summaries
+                r'((?:last|past|previous)\s*(?:3|three)\s*years?[\s:]*[^\.]{30,500})',
+
+                # Attachment/excess information in claims context
+                r'((?:excess|deductible|attachment)\s*(?:of|point)[\s:]*(?:USD|EUR|GBP|INR|KES|AED|SAR|CAD|AUD|\$|â‚¬|Â£)?\s*[0-9,.\s]*(?:million|thousand|m|k)?[^,\n\r;\.]{0,150})',
+            ],
             'period_of_insurance': [
                 r'(?:period\s*of\s*insurance|insurance\s*period|policy\s*period|coverage\s*period)[\s:]*([^,\n\r;]{10,100})',
                 r'(?:effective\s*from|commencing\s*from|valid\s*from)[\s:]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})[\s]*(?:to|until|through|expiring)[\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
@@ -512,12 +586,6 @@ class EnhancedInformationExtractor:
                 r'(?:first\s*loss|retained\s*by\s*insured)[\s:]*([A-Z]{3}[\s]*[0-9,.\s]+(?:million|thousand|m|k)?)',
                 r'(?:subject\s*to\s*excess\s*of)[\s:]*([A-Z]{3}[\s]*[0-9,.\s]+(?:million|thousand|m|k)?)',
             ],
-            'share_offered': [
-                r'(?:share\s*offered|percentage\s*offered|offer(?:ed|ing))[\s:]*([0-9]+(?:\.[0-9]+)?%?)',
-                r'(?:seeking|looking\s*for|require)[\s:]*([0-9]+(?:\.[0-9]+)?%?)[\s]*(?:share|participation)',
-                r'([0-9]+(?:\.[0-9]+)?%?)[\s]*(?:share|participation|quota)',
-            ],
-
             'premium_rates': [
                 r'(?:rate|premium\s*rate)[\s:]*([0-9]+(?:\.[0-9]+)?%?(?:\s*per\s*(?:mille|mill))?)',
                 r'(?:pricing\s*at|priced\s*at)[\s:]*([0-9]+(?:\.[0-9]+)?%?(?:\s*per\s*(?:mille|mill))?)',
@@ -553,246 +621,98 @@ class EnhancedInformationExtractor:
                 r'(?:business\s*activities|commercial\s*activities|operational\s*activities)[\s:]+([^,\n\r;]{10,300})',
                 r'(?:nature\s*of\s*business|scope\s*of\s*operations)[\s:]+([^,\n\r;]{10,300})',
             ],
-            'period_of_insurance': [
-                r'(?:period\s*of\s*insurance|insurance\s*period|policy\s*period|coverage\s*period)[\s:]+([^,\n\r;]{10,100})',
-                r'(?:from|effective|commencing)[\s:]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})[\s]*(?:to|until|expiring)[\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
-                r'(?:valid|coverage)[\s]*(?:from|for)[\s:]*([^,\n\r;]{5,50})',
-                r'(?:\d{1,2})\s*(?:months?|years?)[\s]*(?:from|commencing|starting)',
-                r'(?:12\s*months|24\s*months|36\s*months)[\s]*(?:from|commencing)',
-            ],
+            # 'currency': [
+            #     r'(?:currency|denominated\s*in|in\s*currency\s*of|equivalent\s*in)[\s:]+([A-Z]{3})',
+            #     r'(?:equivalent\s*in|converted\s*to)[\s:]+([A-Z]{3})',
+            #     r'(?:all\s*amounts?\s*in|figures?\s*in|values?\s*in)[\s:]+([A-Z]{3})',
+            #     # Major global currencies
+            #     r'(?:USD|US\$|\$|United\s*States\s*Dollar)',
+            #     r'(?:EUR|€|Euro)',
+            #     r'(?:GBP|£|British\s*Pound|Pound\s*Sterling)',
+            #     r'(?:JPY|¥|Japanese\s*Yen)',
+            #     r'(?:CHF|Swiss\s*Franc)',
+            #     r'(?:CAD|Canadian\s*Dollar)',
+            #     r'(?:AUD|Australian\s*Dollar)',
+            #
+            #     # Middle East & Africa
+            #     r'(?:KES|KSh|Ksh|Kenya\s*Shilling)',
+            #     r'(?:AED|UAE\s*Dirham)',
+            #     r'(?:SAR|Saudi\s*Riyal)',
+            #     r'(?:QAR|Qatari\s*Riyal)',
+            #     r'(?:BHD|Bahraini\s*Dinar)',
+            #     r'(?:KWD|Kuwaiti\s*Dinar)',
+            #     r'(?:OMR|Omani\s*Rial)',
+            #     r'(?:ZAR|South\s*African\s*Rand)',
+            #     r'(?:EGP|Egyptian\s*Pound)',
+            #     r'(?:MAD|Moroccan\s*Dirham)',
+            #     r'(?:TND|Tunisian\s*Dinar)',
+            #     r'(?:NGN|Nigerian\s*Naira)',
+            #     r'(?:GHS|Ghanaian\s*Cedi)',
+            #     r'(?:UGX|Ugandan\s*Shilling)',
+            #     r'(?:TZS|Tanzanian\s*Shilling)',
+            #     r'(?:ETB|Ethiopian\s*Birr)',
+            #
+            #     # Asian currencies
+            #     r'(?:CNY|RMB|Chinese\s*Yuan)',
+            #     r'(?:INR|Indian\s*Rupee)',
+            #     r'(?:SGD|Singapore\s*Dollar)',
+            #     r'(?:HKD|Hong\s*Kong\s*Dollar)',
+            #     r'(?:MYR|Malaysian\s*Ringgit)',
+            #     r'(?:THB|Thai\s*Baht)',
+            #     r'(?:IDR|Indonesian\s*Rupiah)',
+            #     r'(?:PHP|Philippine\s*Peso)',
+            #     r'(?:KRW|South\s*Korean\s*Won)',
+            #
+            #
+            # ],
             'currency': [
-                r'(?:currency|denominated\s*in|in\s*currency\s*of|equivalent\s*in)[\s:]+([A-Z]{3})',
+                # Context-based detection
+                r'(?:currency|denominated\s*in|amounts?\s*in|values?\s*in)[\s:]+([A-Z]{3})',
                 r'(?:equivalent\s*in|converted\s*to)[\s:]+([A-Z]{3})',
-                r'(?:all\s*amounts?\s*in|figures?\s*in|values?\s*in)[\s:]+([A-Z]{3})',
-                # Major global currencies
-                r'(?:USD|US\$|\$|United\s*States\s*Dollar)',
-                r'(?:EUR|€|Euro)',
-                r'(?:GBP|£|British\s*Pound|Pound\s*Sterling)',
-                r'(?:JPY|¥|Japanese\s*Yen)',
-                r'(?:CHF|Swiss\s*Franc)',
-                r'(?:CAD|Canadian\s*Dollar)',
-                r'(?:AUD|Australian\s*Dollar)',
-
-                # Middle East & Africa
-                r'(?:KES|KSh|Ksh|Kenya\s*Shilling)',
-                r'(?:AED|UAE\s*Dirham)',
-                r'(?:SAR|Saudi\s*Riyal)',
-                r'(?:QAR|Qatari\s*Riyal)',
-                r'(?:BHD|Bahraini\s*Dinar)',
-                r'(?:KWD|Kuwaiti\s*Dinar)',
-                r'(?:OMR|Omani\s*Rial)',
-                r'(?:ZAR|South\s*African\s*Rand)',
-                r'(?:EGP|Egyptian\s*Pound)',
-                r'(?:MAD|Moroccan\s*Dirham)',
-                r'(?:TND|Tunisian\s*Dinar)',
-                r'(?:NGN|Nigerian\s*Naira)',
-                r'(?:GHS|Ghanaian\s*Cedi)',
-                r'(?:UGX|Ugandan\s*Shilling)',
-                r'(?:TZS|Tanzanian\s*Shilling)',
-                r'(?:ETB|Ethiopian\s*Birr)',
-
-                # Asian currencies
-                r'(?:CNY|RMB|Chinese\s*Yuan)',
-                r'(?:INR|Indian\s*Rupee)',
-                r'(?:SGD|Singapore\s*Dollar)',
-                r'(?:HKD|Hong\s*Kong\s*Dollar)',
-                r'(?:MYR|Malaysian\s*Ringgit)',
-                r'(?:THB|Thai\s*Baht)',
-                r'(?:IDR|Indonesian\s*Rupiah)',
-                r'(?:PHP|Philippine\s*Peso)',
-                r'(?:KRW|South\s*Korean\s*Won)',
-
-
+                # Direct currency mentions
+                r'\b(USD|EUR|GBP|INR|CAD|AUD|PHP|SAR|AED|KES)\b',
+                r'(?:US\s*Dollar|Euro|British\s*Pound|Indian\s*Rupee)',
+                r'(?:Canadian\s*Dollar|Australian\s*Dollar|Philippine\s*Peso)',
             ],
         }
 
-
-
     def parse_tsi_and_currency(self, tsi_string: str) -> Tuple[Optional[float], Optional[str]]:
-        """
-        Comprehensive TSI parsing with complete global currency support.
-
-        Returns:
-            Tuple of (amount_float, currency_code)
-        """
+        """Enhanced TSI parsing with better currency detection."""
         if not tsi_string:
             return None, None
 
-        currency_patterns = [
-            r'\b([A-Z]{3})\b\s*[0-9,.]',  # ISO code before number (highest priority)
-            r'([A-Z]{3})\s*[0-9,.]',  # ISO code
-            r'(USD|US\$|\$|EUR|€|GBP|£|CAD|AUD|PHP|INR|SAR|AED|KES)',  # Common symbols
-            r'[0-9,.\s]+([A-Z]{3})\b',  # ISO code after number (lowest priority)
-        ]
-
-        # Comprehensive currency symbol to ISO code mapping
+        # Currency mapping
         currency_map = {
-            # Major global currencies
-            '$': 'USD', 'US$': 'USD', 'USD': 'USD', 'DOLLAR': 'USD',
+            '$': 'USD', 'US$': 'USD', 'USD': 'USD',
             '€': 'EUR', 'EUR': 'EUR', 'EURO': 'EUR',
-            '£': 'GBP', 'GBP': 'GBP', 'POUND': 'GBP', 'STERLING': 'GBP',
-            '¥': 'JPY', 'JPY': 'JPY', 'YEN': 'JPY',
-            'CHF': 'CHF', 'FRANC': 'CHF',
-            'CAD': 'CAD', 'C$': 'CAD',
-            'AUD': 'AUD', 'A$': 'AUD',
-            'NZD': 'NZD', 'NZ$': 'NZD',
-
-            # Middle East currencies
-            'AED': 'AED', 'DIRHAM': 'AED',
-            'SAR': 'SAR', 'RIYAL': 'SAR',
-            'QAR': 'QAR', 'QATARI': 'QAR',
-            'BHD': 'BHD', 'BAHRAINI': 'BHD',
-            'KWD': 'KWD', 'KUWAITI': 'KWD',
-            'OMR': 'OMR', 'OMANI': 'OMR',
-            'JOD': 'JOD', 'JORDANIAN': 'JOD',
-            'LBP': 'LBP', 'LEBANESE': 'LBP',
-            'ILS': 'ILS', 'SHEKEL': 'ILS',
-            'IRR': 'IRR', 'IRANIAN': 'IRR',
-            'IQD': 'IQD', 'IRAQI': 'IQD',
-
-            # African currencies
-            'ZAR': 'ZAR', 'RAND': 'ZAR', 'R': 'ZAR',
-            'KES': 'KES', 'KSH': 'KES', 'KSh': 'KES', 'SHILLING': 'KES',
-            'NGN': 'NGN', 'NAIRA': 'NGN',
-            'GHS': 'GHS', 'CEDI': 'GHS',
-            'EGP': 'EGP', 'EGYPTIAN': 'EGP',
-            'MAD': 'MAD', 'MOROCCAN': 'MAD',
-            'TND': 'TND', 'TUNISIAN': 'TND',
-            'DZD': 'DZD', 'ALGERIAN': 'DZD',
-            'AOA': 'AOA', 'ANGOLAN': 'AOA',
-            'BWP': 'BWP', 'PULA': 'BWP',
-            'ETB': 'ETB', 'BIRR': 'ETB',
-            'GHC': 'GHS', 'GHANA': 'GHS',
-            'UGX': 'UGX', 'UGANDAN': 'UGX',
-            'TZS': 'TZS', 'TANZANIAN': 'TZS',
-            'RWF': 'RWF', 'RWANDAN': 'RWF',
-            'ZMW': 'ZMW', 'KWACHA': 'ZMW',
-            'MWK': 'MWK', 'MALAWIAN': 'MWK',
-            'MZN': 'MZN', 'METICAL': 'MZN',
-
-            # Asian currencies
-            'CNY': 'CNY', 'RMB': 'CNY', 'YUAN': 'CNY', '￥': 'CNY',
-            'INR': 'INR', 'RUPEE': 'INR', '₹': 'INR',
-            'SGD': 'SGD', 'S$': 'SGD',
-            'HKD': 'HKD', 'HK$': 'HKD',
-            'MYR': 'MYR', 'RINGGIT': 'MYR',
-            'THB': 'THB', 'BAHT': 'THB',
-            'IDR': 'IDR', 'RUPIAH': 'IDR',
-            'PHP': 'PHP', 'PESO': 'PHP', '₱': 'PHP',
-            'KRW': 'KRW', 'WON': 'KRW', '₩': 'KRW',
-            'TWD': 'TWD', 'NT$': 'TWD',
-            'VND': 'VND', 'DONG': 'VND', '₫': 'VND',
-            'LAK': 'LAK', 'KIP': 'LAK',
-            'KHR': 'KHR', 'RIEL': 'KHR',
-            'MMK': 'MMK', 'KYAT': 'MMK',
-            'BDT': 'BDT', 'TAKA': 'BDT',
-            'PKR': 'PKR', 'PAKISTANI': 'PKR',
-            'LKR': 'LKR', 'SRI': 'LKR',
-            'NPR': 'NPR', 'NEPALESE': 'NPR',
-            'BTN': 'BTN', 'NGULTRUM': 'BTN',
-            'AFN': 'AFN', 'AFGHANI': 'AFN',
-            'UZS': 'UZS', 'SOM': 'UZS',
-            'KZT': 'KZT', 'TENGE': 'KZT',
-            'KGS': 'KGS', 'KYRGYZSTANI': 'KGS',
-            'TJS': 'TJS', 'SOMONI': 'TJS',
-            'TMT': 'TMT', 'MANAT': 'TMT',
-            'MNT': 'MNT', 'TUGRIK': 'MNT',
-
-            # European currencies (non-Euro)
-            'RUB': 'RUB', 'RUBLE': 'RUB', '₽': 'RUB',
-            'UAH': 'UAH', 'HRYVNIA': 'UAH', '₴': 'UAH',
-            'PLN': 'PLN', 'ZLOTY': 'PLN', 'ZL': 'PLN',
-            'CZK': 'CZK', 'KORUNA': 'CZK',
-            'HUF': 'HUF', 'FORINT': 'HUF',
-            'RON': 'RON', 'LEU': 'RON',
-            'BGN': 'BGN', 'LEVA': 'BGN',
-            'HRK': 'HRK', 'KUNA': 'HRK',
-            'RSD': 'RSD', 'DINAR': 'RSD',
-            'BAM': 'BAM', 'MARKA': 'BAM',
-            'MKD': 'MKD', 'MACEDONIAN': 'MKD',
-            'ALL': 'ALL', 'LEK': 'ALL',
-            'ISK': 'ISK', 'KRONA': 'ISK',
-            'NOK': 'NOK', 'NORWEGIAN': 'NOK',
-            'SEK': 'SEK', 'SWEDISH': 'SEK',
-            'DKK': 'DKK', 'DANISH': 'DKK',
-            'TRY': 'TRY', 'LIRA': 'TRY', '₺': 'TRY',
-
-            # Latin American currencies
-            'BRL': 'BRL', 'REAL': 'BRL', 'R$': 'BRL',
-            'MXN': 'MXN', 'MEXICAN': 'MXN',
-            'ARS': 'ARS', 'ARGENTINE': 'ARS',
-            'CLP': 'CLP', 'CHILEAN': 'CLP',
-            'COP': 'COP', 'COLOMBIAN': 'COP',
-            'PEN': 'PEN', 'SOL': 'PEN',
-            'UYU': 'UYU', 'URUGUAYAN': 'UYU',
-            'VES': 'VES', 'BOLIVAR': 'VES',
-            'BOB': 'BOB', 'BOLIVIANO': 'BOB',
-            'PYG': 'PYG', 'GUARANI': 'PYG',
-            'GTQ': 'GTQ', 'QUETZAL': 'GTQ',
-            'CRC': 'CRC', 'COLON': 'CRC',
-            'NIO': 'NIO', 'CORDOBA': 'NIO',
-            'HNL': 'HNL', 'LEMPIRA': 'HNL',
-            'PAB': 'PAB', 'BALBOA': 'PAB',
-            'DOP': 'DOP', 'DOMINICAN': 'DOP',
-            'JMD': 'JMD', 'JAMAICAN': 'JMD',
-            'TTD': 'TTD', 'TRINIDAD': 'TTD',
-            'BBD': 'BBD', 'BARBADIAN': 'BBD',
-
-            # Pacific currencies
-            'FJD': 'FJD', 'FIJIAN': 'FJD',
-            'PGK': 'PGK', 'KINA': 'PGK',
-            'SBD': 'SBD', 'SOLOMON': 'SBD',
-            'VUV': 'VUV', 'VATU': 'VUV',
-            'WST': 'WST', 'TALA': 'WST',
-            'TOP': 'TOP', 'PAANGA': 'TOP',
-
-            # Other important currencies
-            'IMP': 'IMP', 'MANX': 'IMP',
-            'GGP': 'GGP', 'GUERNSEY': 'GGP',
-            'JEP': 'JEP', 'JERSEY': 'JEP',
-            'GIP': 'GIP', 'GIBRALTAR': 'GIP',
-            'SHP': 'SHP', 'HELENA': 'SHP',
-            'FKP': 'FKP', 'FALKLAND': 'FKP',
+            '£': 'GBP', 'GBP': 'GBP',
+            'INR': 'INR', 'RUPEE': 'INR',
+            'CAD': 'CAD', 'AUD': 'AUD', 'PHP': 'PHP',
+            'SAR': 'SAR', 'AED': 'AED', 'KES': 'KES', 'KSh': 'KES'
         }
 
-        # Extract currency with multiple pattern attempts
+        # Find currency (prioritize 3-letter codes)
         currency = None
         currency_patterns = [
-            # ISO codes (prioritize 3-letter codes)
-            r'\b([A-Z]{3})\b(?=\s*[0-9,.])',  # Currency code before number
-            r'([A-Z]{3})(?=\s*[0-9,.])',  # ISO code
-            # Currency symbols and names
-            r'(USD|US\$|\$|EUR|€|GBP|£|KES|KSh|Ksh|AED|SAR|ZAR|R|CNY|RMB|￥|INR|₹|JPY|¥|CHF)',
-            r'(DOLLAR|EURO|POUND|STERLING|DIRHAM|RIYAL|RAND|YUAN|RUPEE|YEN|FRANC|SHILLING)',
-            # After numbers pattern
-            r'[0-9,.\s]+([A-Z]{3})',
+            r'\b(USD|EUR|GBP|INR|CAD|AUD|PHP|SAR|AED|KES)\b',  # ISO codes
+            r'(US\$|\$|€|£)',  # Symbols
         ]
 
-
-        currency = None
-        tsi_upper = tsi_string.upper()
-
         for pattern in currency_patterns:
-            matches = re.findall(pattern, tsi_upper)
-            if matches:
-                found_currency = matches[0]
-                # Use first valid currency found
-                if found_currency in currency_map or len(found_currency) == 3:
-                    currency = currency_map.get(found_currency, found_currency)
-                    break
+            match = re.search(pattern, tsi_string, re.IGNORECASE)
+            if match:
+                found = match.group(1).upper()
+                currency = currency_map.get(found, found)
+                break
 
-        # Enhanced number extraction with better decimal handling
-        # Remove currency symbols and letters first but preserve spaces around numbers
-        clean_string = re.sub(r'[A-Za-z$€£¥₹₽₺₴₩₱₫]', ' ', tsi_string)
-        clean_string = re.sub(r'[^\d,.\s]', ' ', clean_string)
+        # Extract number
+        # Remove currency and letters, keep numbers and separators
+        clean_string = re.sub(r'[A-Za-z$€£]', '', tsi_string)
 
-        # Multiple number extraction patterns in order of preference
+        # Find the main number
         number_patterns = [
-            r'(\d{1,3}(?:,\d{3})*\.\d{2})',  # 1,000,000.00
-            r'(\d{1,3}(?:,\d{3})*)',  # 1,000,000
-            r'(\d+\.\d{2})',  # 1000000.00
-            r'(\d+\.\d+)',  # 1000000.5
-            r'(\d+)',  # 1000000
+            r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # 1,000,000.00
+            r'(\d+(?:\.\d+)?)',  # Simple number
         ]
 
         base_amount = None
@@ -802,92 +722,395 @@ class EnhancedInformationExtractor:
                 try:
                     number_str = match.group(1).replace(',', '')
                     base_amount = float(number_str)
-                    if base_amount > 0:  # Ensure positive number
+                    if base_amount > 0:
                         break
-                except (ValueError, AttributeError):
+                except ValueError:
                     continue
 
         if base_amount is None:
             return None, currency
 
-        # Enhanced multiplier detection with more precision
-        tsi_lower = tsi_string.lower()
-
-        # Explicit word multipliers (highest priority)
-        if any(word in tsi_lower for word in ['billion', 'billions']):
+        # Apply multipliers
+        lower_text = tsi_string.lower()
+        if 'billion' in lower_text or ' bn' in lower_text:
             base_amount *= 1_000_000_000
-        elif any(word in tsi_lower for word in ['million', 'millions']):
+        elif 'million' in lower_text or ' mn' in lower_text or ' m ' in lower_text:
             base_amount *= 1_000_000
-        elif any(word in tsi_lower for word in ['thousand', 'thousands']):
+        elif 'thousand' in lower_text or ' k ' in lower_text:
             base_amount *= 1_000
-        # Abbreviated multipliers (be more specific to avoid false positives)
-        elif re.search(r'\d+\s*bn\b', tsi_lower):  # "100 bn"
-            base_amount *= 1_000_000_000
-        elif re.search(r'\d+\s*mn\b', tsi_lower):  # "100 mn"
-            base_amount *= 1_000_000
-        elif re.search(r'\d+\s*[km]\b', tsi_lower):  # "100 k" or "100 m"
-            if 'm' in tsi_lower:
-                base_amount *= 1_000_000
-            elif 'k' in tsi_lower:
-                base_amount *= 1_000
 
         return base_amount, currency
 
+    def extract_surveyor_report_enhanced(self, text: str) -> Optional[str]:
+        """Enhanced extraction for risk surveyor reports focusing on report names and sources."""
+        patterns = self.patterns['risk_surveyor_report']
+
+        # Priority order for different types of surveyor information
+        surveyor_info = []
+
+        # First, try to find specific report names/files
+        report_name_patterns = [
+            r'(?:surveyor[\'s]*\s*report|survey\s*report|inspection\s*report)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\-_\.\/()]{10,150})["\']?',
+            r'([A-Za-z0-9][A-Za-z0-9\s\-_\.\/()]{5,80}\.(?:pdf|doc|docx|txt))',  # File names
+        ]
+
+        for pattern in report_name_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0] if match[0] else match[1]
+
+                cleaned_match = str(match).strip()
+                if len(cleaned_match) > 5 and not any(exclude in cleaned_match.lower()
+                                                      for exclude in
+                                                      ['accepts no liability', 'subject to', 'warranty']):
+                    surveyor_info.append(f"Report: {cleaned_match}")
+
+        # Then try to find surveyor companies/names
+        company_patterns = [
+            r'(?:report\s*by|surveyed\s*by|inspected\s*by)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s&\-_\.\/()]{5,100})["\']?',
+            r'(?:risk\s*management|engineering\s*consultant|surveyor)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s&\-_\.\/()]{10,100})["\']?',
+        ]
+
+        for pattern in company_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0] if match[0] else match[1]
+
+                cleaned_match = str(match).strip()
+                if len(cleaned_match) > 5 and not any(exclude in cleaned_match.lower()
+                                                      for exclude in
+                                                      ['accepts no liability', 'subject to', 'warranty']):
+                    surveyor_info.append(f"Surveyor: {cleaned_match}")
+
+        # Finally, look for report dates
+        date_patterns = [
+            r'(?:survey|inspection|report)[\s]*(?:dated|on|of)[\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+        ]
+
+        for pattern in date_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                surveyor_info.append(f"Date: {match}")
+
+        # Return the most relevant information
+        if surveyor_info:
+            # Prioritize report names over surveyor names over dates
+            report_items = [item for item in surveyor_info if item.startswith('Report:')]
+            surveyor_items = [item for item in surveyor_info if item.startswith('Surveyor:')]
+            date_items = [item for item in surveyor_info if item.startswith('Date:')]
+
+            result_parts = []
+            if report_items:
+                result_parts.append(report_items[0])  # Take the first report name
+            if surveyor_items:
+                result_parts.append(surveyor_items[0])  # Take the first surveyor
+            if date_items:
+                result_parts.append(date_items[0])  # Take the first date
+
+            return '; '.join(result_parts) if result_parts else None
+
+        return None
+
+    def extract_claims_experience_enhanced(self, text: str) -> Optional[str]:
+        """Enhanced extraction for comprehensive claims experience data."""
+        patterns = self.patterns['claims_experience']
+
+        claims_data = {
+            'yearly_claims': [],
+            'loss_ratios': [],
+            'claims_free_periods': [],
+            'major_minor_claims': [],
+            'recoveries': [],
+            'general_experience': []
+        }
+
+        # Extract year-wise claims
+        year_pattern = r'(20[0-9]{2})[\s]*[-:][\s]*([^,\n\r;\.]{5,200})'
+        year_matches = re.findall(year_pattern, text, re.IGNORECASE | re.MULTILINE)
+        for year, description in year_matches:
+            clean_desc = description.strip()
+            if len(clean_desc) > 3:
+                claims_data['yearly_claims'].append(f"{year}: {clean_desc}")
+
+        # Extract loss ratios
+        ratio_patterns = [
+            r'((?:loss|combined|claims?)\s*ratio[\s:]*[0-9]+(?:\.[0-9]+)?%?[^,\n\r;\.]{0,100})',
+            r'((?:frequency|severity)\s*(?:rate|ratio)[\s:]*[^,\n\r;\.]{10,150})'
+        ]
+
+        for pattern in ratio_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                clean_match = str(match).strip()
+                if len(clean_match) > 10:
+                    claims_data['loss_ratios'].append(clean_match)
+
+        # Extract claims-free periods
+        claims_free_patterns = [
+            r'((?:[0-9]+\s*years?|last\s*[0-9]+\s*years?|since\s*[0-9]{4})\s*(?:claims?\s*free|no\s*claims?|nil\s*losses?)[^,\n\r;\.]{0,100})',
+            r'(claims?\s*free\s*(?:for|since)[\s]*[^,\n\r;\.]{5,100})',
+        ]
+
+        for pattern in claims_free_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                clean_match = str(match).strip()
+                if len(clean_match) > 10:
+                    claims_data['claims_free_periods'].append(clean_match)
+
+        # Extract major/minor claims information
+        major_minor_pattern = r'((?:major|minor|significant|small|large)\s*(?:claims?|losses?)[\s:]*[^,\n\r;\.]{10,200})'
+        major_minor_matches = re.findall(major_minor_pattern, text, re.IGNORECASE | re.MULTILINE)
+        for match in major_minor_matches:
+            clean_match = str(match).strip()
+            if len(clean_match) > 15:
+                claims_data['major_minor_claims'].append(clean_match)
+
+        # Extract recovery information
+        recovery_pattern = r'((?:recovered|settlement|recovery|reimbursement)[\s:]*(?:USD|EUR|GBP|INR|KES|AED|SAR|CAD|AUD|\$|â‚¬|Â£)?\s*[0-9,.\s]*(?:million|thousand|m|k)?[^,\n\r;\.]{0,150})'
+        recovery_matches = re.findall(recovery_pattern, text, re.IGNORECASE | re.MULTILINE)
+        for match in recovery_matches:
+            clean_match = str(match).strip()
+            if len(clean_match) > 10:
+                claims_data['recoveries'].append(clean_match)
+
+        # Extract general experience statements
+        general_patterns = [
+            r'((?:well\s*below|above|below)\s*(?:average|industry|market)[\s]*(?:claims?|losses?|experience)[^,\n\r;\.]{0,150})',
+            r'((?:satisfactory|excellent|poor|good)\s*(?:claims?|loss)\s*(?:experience|record)[^,\n\r;\.]{0,150})',
+            r'((?:last|past|previous)\s*(?:3|three)\s*years?[\s]*[^\.]{20,200})'
+        ]
+
+        for pattern in general_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                clean_match = str(match).strip()
+                if len(clean_match) > 15:
+                    claims_data['general_experience'].append(clean_match)
+
+        # Compile comprehensive claims experience
+        result_parts = []
+
+        # Add yearly claims (limit to most recent 5 years)
+        if claims_data['yearly_claims']:
+            yearly_sorted = sorted(claims_data['yearly_claims'], reverse=True)[:5]
+            result_parts.append("Yearly Claims: " + "; ".join(yearly_sorted))
+
+        # Add loss ratios
+        if claims_data['loss_ratios']:
+            result_parts.append("Loss Ratios: " + "; ".join(claims_data['loss_ratios'][:3]))
+
+        # Add claims-free periods
+        if claims_data['claims_free_periods']:
+            result_parts.append("Claims-Free: " + "; ".join(claims_data['claims_free_periods'][:2]))
+
+        # Add major/minor claims
+        if claims_data['major_minor_claims']:
+            result_parts.append("Claim Types: " + "; ".join(claims_data['major_minor_claims'][:3]))
+
+        # Add recoveries
+        if claims_data['recoveries']:
+            result_parts.append("Recoveries: " + "; ".join(claims_data['recoveries'][:2]))
+
+        # Add general experience
+        if claims_data['general_experience']:
+            result_parts.append("General: " + "; ".join(claims_data['general_experience'][:2]))
+
+        if result_parts:
+            return " | ".join(result_parts)
+
+        return None
+
+    def extract_structured_claims(self, text: str) -> Optional[str]:
+        """Extract structured claims experience data."""
+        claims_patterns = [
+            # Year-based claims: 2021: USD 50,000, 2022: Nil, etc.
+            r'(20[0-9]{2}[\s]*[-:][\s]*[^,\n\r;]{5,100})',
+            # Loss ratios: Loss ratio 15%, Combined ratio 85%
+            r'((?:loss|combined)\s*ratio[\s:]*[0-9]+(?:\.[0-9]+)?%?)',
+            # Claims summary: 3 years claims free, No major losses
+            r'((?:[0-9]+\s*years?|last\s*[0-9]+)\s*(?:claims?\s*free|no\s*claims?|nil\s*losses?))',
+        ]
+
+        claims_data = []
+        for pattern in claims_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            claims_data.extend(matches)
+
+        if claims_data:
+            return '; '.join(claims_data[:5])  # Limit to 5 most relevant entries
+        return None
+
+    def extract_share_percentage(self, text: str) -> Optional[str]:
+        """Extract share percentage with validation."""
+        share_patterns = [
+            r'(?:share\s*offered|seeking|require)[\s:]*([0-9]+(?:\.[0-9]+)?)\s*%',
+            r'([0-9]+(?:\.[0-9]+)?)%\s*(?:share|participation|line)',
+            r'(?:line\s*capacity|participation)[\s:]*([0-9]+(?:\.[0-9]+)?)\s*%',
+        ]
+
+        for pattern in share_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                try:
+                    percentage = float(matches[0])
+                    if 0 < percentage <= 100:  # Valid percentage range
+                        return f"{percentage}%"
+                except ValueError:
+                    continue
+        return None
+
+    # def extract_field(self, text: str, field_key: str) -> Optional[str]:
+    #     """Enhanced field extraction with special handling for complex fields."""
+    #     if field_key not in self.patterns:
+    #         return None
+    #
+    #     # Special handling for specific fields
+    #     if field_key == 'claims_experience':
+    #         structured_claims = self.extract_structured_claims(text)
+    #         if structured_claims:
+    #             return structured_claims
+    #
+    #     if field_key == 'share_offered':
+    #         share_percentage = self.extract_share_percentage(text)
+    #         if share_percentage:
+    #             return share_percentage
+    #
+    #     # Standard pattern matching for other fields
+    #     patterns = self.patterns[field_key]
+    #     text_lines = text.split('\n')
+    #
+    #     # Context keywords for better targeting
+    #     context_keywords = {
+    #         'risk_surveyor_report': ['survey', 'inspection', 'recommendations', 'technical', 'engineering'],
+    #         'inward_acceptances': ['inward', 'treaty', 'accepted', 'participating', 'consortium'],
+    #         'claims_experience': ['claims', 'loss', 'experience', 'history', 'ratio'],
+    #         'insured': ['name of insured', 'insured:', 'assured:', 'policyholder:', 'client:'],
+    #         'cedant': ['cedant:', 'ceding company', 'direct insurer', 'original insurer'],
+    #         'broker': ['broker:', 'intermediary:', 'placed by', 'via'],
+    #         'total_sum_insured': ['sum insured', 'tsi', 'insured value', 'coverage amount', 'limit'],
+    #         'share_offered': ['share offered', '% offered', 'seeking', 'participation','quota', 'line capacity','share'],
+    #         'premium_rates': ['rate', 'pricing', '% rate', 'per mille'],
+    #         'period_of_insurance': ['period', 'effective', 'coverage period', 'policy period', 'duration']
+    #     }
+    #
+    #     field_contexts = context_keywords.get(field_key, [])
+    #
+    #     # Try contextual extraction first
+    #     for line in text_lines:
+    #         line_lower = line.lower()
+    #         has_context = any(ctx.lower() in line_lower for ctx in field_contexts)
+    #
+    #         if has_context:
+    #             for pattern in patterns:
+    #                 try:
+    #                     matches = re.findall(pattern, line, re.IGNORECASE | re.MULTILINE)
+    #                     if matches:
+    #                         for match in matches:
+    #                             cleaned_match = self._validate_and_clean_match(match, field_key)
+    #                             if cleaned_match:
+    #                                 return cleaned_match
+    #                 except re.error as e:
+    #                     logger.warning(f"Regex error: {e}")
+    #                     continue
+    #
+    #     # Fallback to full text searchs
+    #     for pattern in patterns:
+    #         try:
+    #             matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+    #             if matches:
+    #                 for match in matches:
+    #                     cleaned_match = self._validate_and_clean_match(match, field_key)
+    #                     if cleaned_match:
+    #                         return cleaned_match
+    #         except re.error as e:
+    #             logger.warning(f"Regex error: {e}")
+    #             continue
+    #
+    #     return None
+
     def extract_field(self, text: str, field_key: str) -> Optional[str]:
-        """Context-aware field extraction with validation."""
+        """Enhanced field extraction with special handling for complex fields."""
         if field_key not in self.patterns:
             return None
 
+        # Special handling for enhanced fields
+        if field_key == 'risk_surveyor_report':
+            enhanced_result = self.extract_surveyor_report_enhanced(text)
+            if enhanced_result:
+                return enhanced_result
+
+        if field_key == 'claims_experience':
+            enhanced_result = self.extract_claims_experience_enhanced(text)
+            if enhanced_result:
+                return enhanced_result
+            # Fallback to structured claims extraction
+            structured_claims = self.extract_structured_claims(text)
+            if structured_claims:
+                return structured_claims
+
+        if field_key == 'share_offered':
+            share_percentage = self.extract_share_percentage(text)
+            if share_percentage:
+                return share_percentage
+
+        # Standard pattern matching for other fields
         patterns = self.patterns[field_key]
         text_lines = text.split('\n')
 
-        # field context keywords for better accuracy
+        # Context keywords for better targeting
         context_keywords = {
+            'risk_surveyor_report': ['survey', 'inspection', 'recommendations', 'technical', 'engineering', 'report'],
+            'inward_acceptances': ['inward', 'treaty', 'accepted', 'participating', 'consortium'],
+            'claims_experience': ['claims', 'loss', 'experience', 'history', 'ratio', 'frequency'],
             'insured': ['name of insured', 'insured:', 'assured:', 'policyholder:', 'client:'],
             'cedant': ['cedant:', 'ceding company', 'direct insurer', 'original insurer'],
             'broker': ['broker:', 'intermediary:', 'placed by', 'via'],
             'total_sum_insured': ['sum insured', 'tsi', 'insured value', 'coverage amount', 'limit'],
-            'share_offered': ['share offered', '% offered', 'seeking', 'participation'],
+            'share_offered': ['share offered', '% offered', 'seeking', 'participation', 'quota', 'line capacity', 'share'],
             'premium_rates': ['rate', 'pricing', '% rate', 'per mille'],
             'period_of_insurance': ['period', 'effective', 'coverage period', 'policy period', 'duration']
         }
 
         field_contexts = context_keywords.get(field_key, [])
 
-        # Try each pattern with context awareness
-        for pattern in patterns:
-            try:
-                # First, look for matches in lines with relevant context
-                for line in text_lines:
-                    line_lower = line.lower()
+        # Try contextual extraction first
+        for line in text_lines:
+            line_lower = line.lower()
+            has_context = any(ctx.lower() in line_lower for ctx in field_contexts)
 
-                    # Check if line contains field context
-                    has_context = any(ctx.lower() in line_lower for ctx in field_contexts)
-
-                    if has_context or not field_contexts:  # If no specific context needed
+            if has_context:
+                for pattern in patterns:
+                    try:
                         matches = re.findall(pattern, line, re.IGNORECASE | re.MULTILINE)
                         if matches:
                             for match in matches:
                                 cleaned_match = self._validate_and_clean_match(match, field_key)
                                 if cleaned_match:
                                     return cleaned_match
+                    except re.error as e:
+                        logger.warning(f"Regex error: {e}")
+                        continue
 
-                # If no contextual matches, try full text (lower priority)
+        # Fallback to full text search
+        for pattern in patterns:
+            try:
                 matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
                 if matches:
                     for match in matches:
                         cleaned_match = self._validate_and_clean_match(match, field_key)
                         if cleaned_match:
                             return cleaned_match
-
             except re.error as e:
-                logger.warning(f"Regex error in pattern '{pattern}': {e}")
+                logger.warning(f"Regex error: {e}")
                 continue
 
         return None
 
     def _validate_and_clean_match(self, match: Any, field_key: str) -> Optional[str]:
-        """Validate and clean extracted matches based on field type."""
+        """Enhanced validation with content filtering."""
         if isinstance(match, tuple):
             match = match[0] if match[0] else (match[1] if len(match) > 1 else '')
 
@@ -896,27 +1119,44 @@ class EnhancedInformationExtractor:
 
         cleaned_match = str(match).strip()
 
+        # Global exclusions (policy/technical language)
+        excluded_terms = [
+            'accepts no liability', 'damage caused by viruses', 'transmitted via email',
+            'warranties excluding', 'usa/canada', 'cross border reinsurers',
+            'divisions deputed', 'plant head', 'consulting engineers fees',
+            'foreign expert visit', 'limit 5%', 'subject to maximum'
+        ]
+
+        if any(term in cleaned_match.lower() for term in excluded_terms):
+            return None
+
         # Field-specific validation
-        if field_key == 'insured' or field_key == 'cedant' or field_key == 'broker':
-            # Company names should be reasonable length and contain letters
-            if len(cleaned_match) < 3 or len(cleaned_match) > 150:
-                return None
-            if not re.search(r'[A-Za-z]', cleaned_match):
+        if field_key in ['insured', 'cedant', 'broker']:
+            # Must be a reasonable company name
+            if len(cleaned_match) < 5 or len(cleaned_match) > 150:
                 return None
 
-        elif field_key == 'total_sum_insured':
-            # TSI should contain numbers
-            if not re.search(r'[0-9]', cleaned_match):
+            # Should not contain technical terms
+            technical_terms = ['clause', 'warranty', 'exclusion', 'limit', 'subject to']
+            if any(term in cleaned_match.lower() for term in technical_terms):
                 return None
 
-        elif field_key == 'share_offered':
-            # Share should be a reasonable percentage
-            if re.search(r'[0-9]+', cleaned_match):
-                num = re.search(r'([0-9]+(?:\.[0-9]+)?)', cleaned_match)
-                if num:
-                    value = float(num.group(1))
-                    if value > 100:  # Percentage shouldn't exceed 100%
-                        return None
+            # Should contain company indicators or be a proper business name
+            company_indicators = ['ltd', 'limited', 'inc', 'corp', 'company', 'co', 'pvt', 'private', 'assurance',
+                                  'insurance']
+            word_count = len(cleaned_match.split())
+            has_company_indicator = any(indicator in cleaned_match.lower() for indicator in company_indicators)
+
+            if not has_company_indicator and word_count < 2:
+                return None
+
+        elif field_key == 'claims_experience':
+            # Combine fragmented claims data into coherent sentence
+            if len(cleaned_match) < 15:  # Too short to be meaningful
+                return None
+            # Clean up fragmented dates and descriptions
+            cleaned_match = re.sub(r'\s+', ' ', cleaned_match)
+            cleaned_match = re.sub(r';\s*', '; ', cleaned_match)
 
         return cleaned_match.title() if field_key in ['insured', 'cedant', 'broker'] else cleaned_match
 
@@ -1142,6 +1382,10 @@ class FacultativeReinsuranceExtractor:
             'total_sum_insured': 'total_sum_insured',
             'currency': 'currency',
             'period_of_insurance': 'period_of_insurance',
+            'risk_surveyor_report': 'risk_surveyor_report',
+            'inward_acceptances': 'inward_acceptances',
+            'share_offered': 'share_offered',
+            'claims_experience': 'claims_experience',
         }
 
         extracted_count = 0
@@ -1395,93 +1639,93 @@ class FacultativeReinsuranceExtractor:
         logger.info(f"Overall summary saved: {summary_path}")
 
 
-def main():
-    # CONFIGURATION - Edit these paths according to your setup
-    INPUT_FOLDER = "test insuarance docs"
-    OUTPUT_FOLDER = "Friday Morning Sept 26 2025 "
-
-    # Check if email libraries are available
-    if not HAS_EMAIL_LIBS:
-        logger.warning("Email processing libraries not available. MSG files will be skipped.")
-
-    if not HAS_DOC_LIBS:
-        logger.error("Document processing libraries not available. Exiting.")
-        return
-
-    # Initialize enhanced extractor
-    logger.info("Initializing Enhanced Facultative Reinsurance Extractor...")
-    try:
-        extractor = FacultativeReinsuranceExtractor()
-    except Exception as e:
-        logger.error(f"Failed to initialize extractor: {e}")
-        return
-
-    # Process documents with optimized workflow
-    logger.info(f"Starting optimized extraction from: {INPUT_FOLDER}")
-    start_time = datetime.now()
-
-    results = extractor.process_folder_optimized(INPUT_FOLDER)
-
-    end_time = datetime.now()
-    processing_duration = (end_time - start_time).total_seconds()
-
-    # Save enhanced results
-    if results:
-        # Use the enhanced save method
-        # extractor.save_results_enhanced = lambda r, o: save_results_enhanced(extractor, r, o)
-        extractor.save_results_enhanced(results, OUTPUT_FOLDER)
-
-        logger.info(f"Extraction complete in {processing_duration:.2f} seconds. Processed {len(results)} files.")
-
-        # Calculate and print enhanced summary
-        high_confidence_count = sum(1 for r in results if r.confidence_score >= 0.5)
-        avg_confidence = sum(r.confidence_score for r in results) / len(results)
-        email_count = sum(1 for r in results if r.processing_method == 'email_extraction')
-        ocr_count = sum(1 for r in results if r.used_ocr)
-        tsi_parsed_count = sum(1 for r in results if r.total_sum_insured_float is not None)
-
-        print("\n" + "=" * 60)
-        print("ENHANCED EXTRACTION SUMMARY")
-        print("=" * 60)
-        print(f"Total files processed: {len(results)}")
-        print(f"Processing time: {processing_duration:.2f} seconds")
-        print(f"Average time per file: {processing_duration / len(results):.2f} seconds")
-        print(
-            f"High confidence extractions: {high_confidence_count} ({high_confidence_count / len(results) * 100:.1f}%)")
-        print(f"Email sources processed: {email_count}")
-        print(f"Files requiring OCR: {ocr_count}")
-        print(f"TSI values parsed: {tsi_parsed_count}")
-        print(f"Average confidence score: {avg_confidence:.3f}")
-
-        # Show TSI summary if available
-        if tsi_parsed_count > 0:
-            tsi_values = [r.total_sum_insured_float for r in results if r.total_sum_insured_float is not None]
-            print(f"\nTSI Analysis:")
-            print(f"  Total TSI values: {len(tsi_values)}")
-            print(f"  Average TSI: {sum(tsi_values) / len(tsi_values):,.0f}")
-            print(f"  Min TSI: {min(tsi_values):,.0f}")
-            print(f"  Max TSI: {max(tsi_values):,.0f}")
-
-        # Show processing method breakdown
-        method_counts = {}
-        for r in results:
-            method = r.processing_method or 'unknown'
-            method_counts[method] = method_counts.get(method, 0) + 1
-
-        print(f"\nProcessing Methods:")
-        for method, count in sorted(method_counts.items()):
-            print(f"  {method}: {count}")
-
-        print(f"\nResults saved to: {OUTPUT_FOLDER}")
-        print("=" * 60)
-
-    else:
-        logger.warning("No files were successfully processed.")
-        print("\nNo files were processed successfully. Check:")
-        print("1. Input folder path is correct")
-        print("2. Folder contains supported file types (.msg, .pdf, .docx, etc.)")
-        print("3. Files are not corrupted or password-protected")
-        print("4. Required libraries are installed")
-
-if __name__ == "__main__":
-    main()
+# def main():
+#     # CONFIGURATION - Edit these paths according to your setup
+#     INPUT_FOLDER = "test insuarance docs"
+#     OUTPUT_FOLDER = "Friday Morning Sept 26 2025 "
+# 
+#     # Check if email libraries are available
+#     if not HAS_EMAIL_LIBS:
+#         logger.warning("Email processing libraries not available. MSG files will be skipped.")
+# 
+#     if not HAS_DOC_LIBS:
+#         logger.error("Document processing libraries not available. Exiting.")
+#         return
+# 
+#     # Initialize enhanced extractor
+#     logger.info("Initializing Enhanced Facultative Reinsurance Extractor...")
+#     try:
+#         extractor = FacultativeReinsuranceExtractor()
+#     except Exception as e:
+#         logger.error(f"Failed to initialize extractor: {e}")
+#         return
+# 
+#     # Process documents with optimized workflow
+#     logger.info(f"Starting optimized extraction from: {INPUT_FOLDER}")
+#     start_time = datetime.now()
+# 
+#     results = extractor.process_folder_optimized(INPUT_FOLDER)
+# 
+#     end_time = datetime.now()
+#     processing_duration = (end_time - start_time).total_seconds()
+# 
+#     # Save enhanced results
+#     if results:
+#         # Use the enhanced save method
+#         # extractor.save_results_enhanced = lambda r, o: save_results_enhanced(extractor, r, o)
+#         extractor.save_results_enhanced(results, OUTPUT_FOLDER)
+# 
+#         logger.info(f"Extraction complete in {processing_duration:.2f} seconds. Processed {len(results)} files.")
+# 
+#         # Calculate and print enhanced summary
+#         high_confidence_count = sum(1 for r in results if r.confidence_score >= 0.5)
+#         avg_confidence = sum(r.confidence_score for r in results) / len(results)
+#         email_count = sum(1 for r in results if r.processing_method == 'email_extraction')
+#         ocr_count = sum(1 for r in results if r.used_ocr)
+#         tsi_parsed_count = sum(1 for r in results if r.total_sum_insured_float is not None)
+# 
+#         print("\n" + "=" * 60)
+#         print("ENHANCED EXTRACTION SUMMARY")
+#         print("=" * 60)
+#         print(f"Total files processed: {len(results)}")
+#         print(f"Processing time: {processing_duration:.2f} seconds")
+#         print(f"Average time per file: {processing_duration / len(results):.2f} seconds")
+#         print(
+#             f"High confidence extractions: {high_confidence_count} ({high_confidence_count / len(results) * 100:.1f}%)")
+#         print(f"Email sources processed: {email_count}")
+#         print(f"Files requiring OCR: {ocr_count}")
+#         print(f"TSI values parsed: {tsi_parsed_count}")
+#         print(f"Average confidence score: {avg_confidence:.3f}")
+# 
+#         # Show TSI summary if available
+#         if tsi_parsed_count > 0:
+#             tsi_values = [r.total_sum_insured_float for r in results if r.total_sum_insured_float is not None]
+#             print(f"\nTSI Analysis:")
+#             print(f"  Total TSI values: {len(tsi_values)}")
+#             print(f"  Average TSI: {sum(tsi_values) / len(tsi_values):,.0f}")
+#             print(f"  Min TSI: {min(tsi_values):,.0f}")
+#             print(f"  Max TSI: {max(tsi_values):,.0f}")
+# 
+#         # Show processing method breakdown
+#         method_counts = {}
+#         for r in results:
+#             method = r.processing_method or 'unknown'
+#             method_counts[method] = method_counts.get(method, 0) + 1
+# 
+#         print(f"\nProcessing Methods:")
+#         for method, count in sorted(method_counts.items()):
+#             print(f"  {method}: {count}")
+# 
+#         print(f"\nResults saved to: {OUTPUT_FOLDER}")
+#         print("=" * 60)
+# 
+#     else:
+#         logger.warning("No files were successfully processed.")
+#         print("\nNo files were processed successfully. Check:")
+#         print("1. Input folder path is correct")
+#         print("2. Folder contains supported file types (.msg, .pdf, .docx, etc.)")
+#         print("3. Files are not corrupted or password-protected")
+#         print("4. Required libraries are installed")
+# 
+# if __name__ == "__main__":
+#     main()
