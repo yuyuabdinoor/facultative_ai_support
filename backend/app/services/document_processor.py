@@ -1,18 +1,16 @@
-# backend/app/services/document_processor.py
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
+import asyncio
 import re
 import json
-import asyncio
 import openai
-from calculation_service import CalculationService
 
-# Set your OpenAI API key here
-openai.api_key = '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'
+from dotenv import load_dotenv; load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 @dataclass
 class ExtractedInfo:
@@ -27,7 +25,6 @@ class ExtractedInfo:
     total_sum_insured: Optional[Decimal] = None
     premium: Optional[Decimal] = None
     currency: Optional[str] = "USD"
-    premium_rate_percent: Optional[Decimal] = None
     paid_losses: Optional[Decimal] = None
     outstanding_reserves: Optional[Decimal] = None
     recoveries: Optional[Decimal] = None
@@ -43,73 +40,85 @@ class ExtractedInfo:
     risk_surveyor_report: Optional[str] = None
     climate_change_risk_factors: Optional[str] = None
     esg_risk_assessment: Optional[Dict[str, str]] = None
-    climate_change_risk: Optional[Dict[str, Any]] = None
     timestamp: Optional[str] = None
 
+# ------------------- Calculation Service -------------------
+class CalculationService:
+    def __init__(self, exchange_csv: str):
+        self.rates = pd.read_csv(exchange_csv).set_index("Currency")["Rate_to_KES"].to_dict()
+
+    def _get_exchange_rate(self, currency: str) -> Decimal:
+        currency = currency.upper()
+        return Decimal(str(self.rates.get(currency, 1.0)))
+
+    async def convert_to_kes(self, amount: Decimal, currency: str) -> Decimal:
+        return amount * self._get_exchange_rate(currency)
+
+    def calculate_premium_rate(self, premium: Decimal, tsi: Decimal) -> Decimal:
+        if tsi == 0:
+            return Decimal("0.00")
+        return ((premium / tsi) * 100).quantize(Decimal("0.001"), ROUND_HALF_UP)
+
+    def calculate_loss_ratio(self, paid: Decimal, outstanding: Decimal, recoveries: Decimal, earned: Decimal) -> Dict[str, Any]:
+        if earned == 0:
+            return {"ratio": Decimal("0.00"), "status": "N/A", "recommendation": "No earned premium"}
+        incurred = paid + outstanding - recoveries
+        ratio = (incurred / earned * 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        if ratio < 60:
+            status, recommendation = "LOW_RISK", "ACCEPT"
+        elif ratio <= 80:
+            status, recommendation = "MEDIUM_RISK", "REFER"
+        else:
+            status, recommendation = "HIGH_RISK", "DECLINE"
+        return {"ratio": ratio, "status": status, "recommendation": recommendation}
+
+    def calculate_facultative_share(self, gross_premium: Decimal, tsi: Decimal, share_percent: Decimal) -> Dict[str, Decimal]:
+        share_decimal = share_percent / Decimal("100")
+        return {
+            "accepted_premium": (gross_premium * share_decimal).quantize(Decimal("0.01")),
+            "accepted_liability": (tsi * share_decimal).quantize(Decimal("0.01"))
+        }
+
+# ------------------- Document Processor -------------------
 class DocumentProcessor:
-    def __init__(self, file_path: Optional[str] = None, exchange_csv: str = "/Users/yussufabdinoor/facultative_ai_support/exchange_rates.csv"):
+    def __init__(self, file_path: str, exchange_csv: str):
         self.file_path = file_path
-        self.results: Dict[str, Any] = {}
-        self.calculator = CalculationService(csv_path=exchange_csv)
+        self.calculator = CalculationService(exchange_csv)
+        self.results = {}
 
-    async def process(self, file_path: Optional[str] = None):
-        self.file_path = file_path or self.file_path
-        if not self.file_path or not Path(self.file_path).exists():
-            raise ValueError(f"File not found: {self.file_path}")
-
-        data = await self._extract_structured_data_from_file(self.file_path)
-        data = self._compute_fields(data)
-
-        # Generate CAT exposure via GPT
-        data["cat_exposure"] = await self._generate_cat_exposure(data)
-
-        # ESG and climate risk
-        data["esg_risk_assessment"] = await self._analyze_esg(data)
-        data["climate_change_risk"] = await self._analyze_climate_risk(data)
-
-        data["timestamp"] = datetime.utcnow().isoformat()
+    async def process(self) -> Dict[str, Any]:
+        data = await self._extract_data()
+        data = await self._compute_fields(data)
         self.results = data
-
-        # Save to Excel
-        self._export_to_excel("facultative_output.xlsx")
         return data
 
-    async def _extract_structured_data_from_file(self, file_path: str) -> Dict[str, Any]:
-        ext = Path(file_path).suffix.lower()
-        if ext == ".xlsx":
-            df = pd.read_excel(file_path)
-        elif ext == ".csv":
-            df = pd.read_csv(file_path)
-        else:
-            raise ValueError("Unsupported file type")
-
+    async def _extract_data(self) -> Dict[str, Any]:
+        ext = Path(self.file_path).suffix.lower()
+        df = pd.read_excel(self.file_path) if ext == ".xlsx" else pd.read_csv(self.file_path)
         df.columns = [str(c).strip().lower() for c in df.columns]
-        first_row = df.iloc[0] if not df.empty else {}
+        row = df.iloc[0] if not df.empty else {}
 
-        def safe_get(col, default=None):
-            val = first_row.get(col, default)
-            if pd.isna(val):
-                return default
-            return val
+        def safe_get(col, default="UNKNOWN"):
+            return row.get(col, default) or default
 
-        data = {
-            "insured": safe_get("insured", "UNKNOWN"),
-            "cedant": safe_get("cedant", "UNKNOWN"),
-            "broker": safe_get("broker", "UNKNOWN"),
-            "perils_covered": self._extract_perils(str(safe_get("perils covered", ""))),
-            "geographical_limit": safe_get("geographical limit", "UNKNOWN"),
-            "situation_of_risk": safe_get("situation of risk", "UNKNOWN"),
-            "occupation_of_insured": safe_get("occupation of insured", "UNKNOWN"),
-            "main_activities": safe_get("main activities", "UNKNOWN"),
-            "period_of_insurance": safe_get("period of insurance", "UNKNOWN"),
-            "total_sum_insured": self._safe_decimal(first_row.get("total sums insured (fac ri)", 0)),
-            "premium": self._safe_decimal(first_row.get("premium", 0)),
+        return {
+            "insured": safe_get("insured"),
+            "cedant": safe_get("cedant"),
+            "broker": safe_get("broker"),
+            "perils_covered": re.findall(r"Fire|Flood|Earthquake|Cyclone|BI|Machinery Breakdown|IAR", str(safe_get("perils covered", "")), flags=re.I),
+            "geographical_limit": safe_get("geographical limit"),
+            "situation_of_risk": safe_get("situation of risk"),
+            "occupation_of_insured": safe_get("occupation of insured"),
+            "main_activities": safe_get("main activities"),
+            "period_of_insurance": safe_get("period of insurance"),
+            "total_sum_insured": Decimal(str(safe_get("total sums insured (fac ri)", 0))),
+            "premium": Decimal(str(safe_get("premium", 0))),
             "currency": safe_get("currency", "USD"),
-            "paid_losses": self._safe_decimal(first_row.get("paid losses", 0)),
-            "outstanding_reserves": self._safe_decimal(first_row.get("outstanding reserves", 0)),
-            "recoveries": self._safe_decimal(first_row.get("recoveries", 0)),
-            "earned_premium": self._safe_decimal(first_row.get("earned premium", 0)),
-            "share_offered_percent": self._safe_decimal(first_row.get("share offered %", 0)),
+            "paid_losses": Decimal(str(safe_get("paid losses", 0))),
+            "outstanding_reserves": Decimal(str(safe_get("outstanding reserves", 0))),
+            "recoveries": Decimal(str(safe_get("recoveries", 0))),
+            "earned_premium": Decimal(str(safe_get("earned premium", 0))),
+            "share_offered_percent": Decimal(str(safe_get("share offered %", 0))),
             "excess_deductible": safe_get("excess", "TBD"),
             "retention_of_cedant": safe_get("retention of cedant", "TBD"),
             "possible_maximum_loss": safe_get("possible maximum loss (pml %)", "TBD"),
@@ -119,103 +128,113 @@ class DocumentProcessor:
             "premium_rates": safe_get("premium rates", "TBD"),
             "climate_change_risk_factors": safe_get("climate change risk factors", "TBD"),
         }
-        return data
 
-    def _compute_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        tsi = data.get("total_sum_insured", Decimal(0))
-        premium = data.get("premium", Decimal(0))
-        currency = data.get("currency", "USD")
+    async def _compute_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        tsi = data["total_sum_insured"]
+        premium = data["premium"]
+        share = data.get("share_offered_percent", Decimal("0"))
 
         # Convert to KES
-        data["total_sum_insured_kes"] = self.calculator.convert_currency(tsi, currency, "KES") if tsi else Decimal("0.00")
-        data["premium_kes"] = self.calculator.convert_currency(premium, currency, "KES") if premium else Decimal("0.00")
+        data["total_sum_insured_kes"] = await self.calculator.convert_to_kes(tsi, data["currency"])
+        data["premium_kes"] = await self.calculator.convert_to_kes(premium, data["currency"])
 
-        # Premium Rate %
+        # Premium rate & loss ratio
         data["premium_rate"] = self.calculator.calculate_premium_rate(premium, tsi)
-
-        # Loss ratio
         data["loss_ratio"] = self.calculator.calculate_loss_ratio(
-            data.get("paid_losses", Decimal(0)),
-            data.get("outstanding_reserves", Decimal(0)),
-            data.get("recoveries", Decimal(0)),
-            data.get("earned_premium", Decimal(0))
+            data["paid_losses"], data["outstanding_reserves"], data["recoveries"], data["earned_premium"]
         )
 
         # Facultative share
-        share = data.get("share_offered_percent", Decimal(0))
-        data.update(self.calculator.calculate_facultative_share(premium, tsi, share))
+        share_data = self.calculator.calculate_facultative_share(premium, tsi, share)
+        data.update(share_data)
+
+        # GPT-generated CAT exposure
+        data["cat_exposure"] = await self._generate_cat_exposure(data)
+
+        # GPT ESG assessment
+        data["esg_risk_assessment"] = await self._generate_esg(data)
+
+        # GPT climate change risk
+        data["climate_change_risk"] = await self._generate_climate_risk(data)
+
+        data["timestamp"] = datetime.utcnow().isoformat()
         return data
 
-    def _safe_decimal(self, val) -> Decimal:
-        try:
-            return Decimal(str(val)).quantize(Decimal("0.01"), ROUND_HALF_UP)
-        except:
-            return Decimal("0.00")
-
-    def _extract_perils(self, text: str) -> List[str]:
-        return re.findall(r"Fire|Flood|Earthquake|Cyclone|BI|Machinery Breakdown|IAR", text, flags=re.I)
-
     async def _generate_cat_exposure(self, data: Dict[str, Any]) -> str:
-        prompt = f"Assess CAT exposure for this insurance: {data.get('main_activities','')}, location: {data.get('geographical_limit','')}. Respond in one line."
+        prompt = f"Assess CAT (catastrophe) exposure for an insurance company with these details: {json.dumps(data)}. Give a short explanation."
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a reinsurance analyst."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a reinsurance risk analyst."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0
         )
         return response.choices[0].message.content.strip()
 
-    async def _analyze_esg(self, data: Dict[str, Any]) -> Dict[str, str]:
-        text = f"{data.get('occupation_of_insured','')} {data.get('main_activities','')} {data.get('perils_covered','')} {data.get('geographical_limit','')}"
-        prompt = f"Assess ESG risk for this business text. Return JSON with environmental, social, governance keys with reasoning. Text: {text}"
+    async def _generate_esg(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        text = f"{data['occupation_of_insured']} {data['main_activities']} {data['perils_covered']} {data['geographical_limit']}"
+        prompt = f"Assess ESG risks (environmental, social, governance) for this text. Return JSON with reasoning. Text: {text}"
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a reinsurance ESG analyst."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a reinsurance ESG analyst."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0
         )
         try:
             return json.loads(response.choices[0].message.content)
         except:
-            return {"environmental":"MEDIUM","social":"LOW","governance":"MEDIUM"}
+            return {"environmental": "Unknown", "social": "Unknown", "governance": "Unknown"}
 
-    async def _analyze_climate_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        text = f"Analyze climate change risk for {data.get('main_activities','')} in {data.get('geographical_limit','')}."
-        prompt = f"Analyze climate change risk (HIGH, MODERATE, LOW) with reasoning in JSON. Text: {text}"
+    async def _generate_climate_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        text = f"{data['occupation_of_insured']} in {data['geographical_limit']}"
+        prompt = f"Analyze climate change risk (HIGH, MODERATE, LOW) with reasoning for JSON output. Text: {text}"
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a reinsurance climate analyst."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a climate risk analyst."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0
         )
         try:
             return json.loads(response.choices[0].message.content)
         except:
-            return {"risk_level":"MODERATE","reasoning":response.choices[0].message.content}
+            return {"risk_level": "MODERATE", "reasoning": "Default moderate risk"}
 
-    def _export_to_excel(self, output_path: str):
-        pd.DataFrame([self.results]).to_excel(output_path, index=False)
-
-    def display_results(self, format="text"):
+    def display_results(self):
         if not self.results:
-            print("No results yet. Run process() first.")
+            print("No results to display.")
             return
-        if format == "json":
-            print(json.dumps(self.results, indent=2, default=str))
-        else:
-            for k,v in self.results.items():
-                print(f"{k}: {v}")
+        for k, v in self.results.items():
+            print(f"{k}: {v}")
 
+    def export_to_excel(self, path: str = "facultative_analysis_output.xlsx"):
+        if not self.results:
+            print("No data to export.")
+            return
+        flat = {}
+        for k, v in self.results.items():
+            flat[k] = json.dumps(v, indent=2) if isinstance(v, (dict, list)) else v
+        pd.DataFrame([flat]).to_excel(path, index=False)
+        print(f"Results exported to {path}")
+
+# ------------------- Runner -------------------
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
         print("Usage: python document_processor.py <file_path>")
         sys.exit(1)
+
     file_path = sys.argv[1]
+    exchange_csv = "/Users/yussufabdinoor/facultative_ai_support/exchange_rates.csv"
 
     async def runner():
-        processor = DocumentProcessor(file_path)
+        processor = DocumentProcessor(file_path, exchange_csv)
         await processor.process()
         processor.display_results()
+        processor.export_to_excel("/Users/yussufabdinoor/facultative_ai_support/facultative_analysis_output.xlsx")
 
     asyncio.run(runner())
