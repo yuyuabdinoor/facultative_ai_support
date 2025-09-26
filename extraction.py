@@ -314,6 +314,18 @@ class SmartDocumentProcessor:
                 ocr_version="PP-OCRv4",
                 device='cpu',
             )
+            # self.ocr = PaddleOCR(
+            #     text_detection_model_name='PP-OCRv5_mobile_det',
+            #     text_recognition_model_name='PP-OCRv5_server_rec',
+            #     text_detection_model_dir="PP-OCRv5_mobile_det_infer",
+            #     text_recognition_model_dir="PP-OCRv5_server_rec_infer",
+            #     use_doc_orientation_classify=False,
+            #     use_doc_unwarping=False,
+            #     use_textline_orientation=False,
+            #     lang='en',
+            #     ocr_version="PP-OCRv5",
+            #     device='cpu',
+            # )
         return self.ocr
 
     def process_pdf_smart(self, file_path: str, max_pages: int = 20) -> Tuple[str, bool]:
@@ -460,12 +472,14 @@ class EnhancedInformationExtractor:
     def __init__(self):
         """Initialize with enhanced extraction patterns."""
         self.patterns = {
+
             'insured': [
-                # Extended patterns for longer company names
-                r'(?:name\s*of\s*)?(?:insured|assured|policyholder)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,200}?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|Public|PLC|LLC|S\.A\.|S\.L\.|GmbH))?)["\']?',
-                r'(?:company|entity|organization)[\s]*(?:name)?[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,200}?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|Public|PLC|LLC|S\.A\.|S\.L\.|GmbH))?)["\']?',
-                r'(?:the\s*)?(?:client|customer)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,200}?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|Public|PLC|LLC|S\.A\.|S\.L\.|GmbH))?)["\']?',
-                r'(?:risk\s*holder|policy\s*holder)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,200}?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|Public|PLC|LLC|S\.A\.|S\.L\.|GmbH))?)["\']?',
+                # More specific patterns to avoid grabbing policy text
+                r'(?:name\s*of\s*insured|insured\s*name|company\s*name)[\s:]+([A-Za-z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
+                r'(?:insured|assured|policyholder)[\s:]+([A-Z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
+                r'(?:client|customer|entity)[\s:]+([A-Z][A-Za-z0-9\s\.,&\-()]*?(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)',
+                # Fallback for cases without clear labels
+                r'\b([A-Z][A-Za-z0-9\s&\-()]{10,100}(?:\s+(?:S\.A\.E\.|Ltd\.|Limited|Inc\.|Corp\.|Company|Co\.|Pvt\.|Private|LLC|S\.A\.|GmbH))+)\b',
             ],
             'cedant': [
                 r'(?:cedant|ceding\s*company|ceding\s*insurer)[\s:]*["\']?([A-Za-z][A-Za-z0-9\s\.,&\-()]{4,150})["\']?',
@@ -592,6 +606,8 @@ class EnhancedInformationExtractor:
             ],
         }
 
+
+
     def parse_tsi_and_currency(self, tsi_string: str) -> Tuple[Optional[float], Optional[str]]:
         """
         Comprehensive TSI parsing with complete global currency support.
@@ -601,6 +617,13 @@ class EnhancedInformationExtractor:
         """
         if not tsi_string:
             return None, None
+
+        currency_patterns = [
+            r'\b([A-Z]{3})\b\s*[0-9,.]',  # ISO code before number (highest priority)
+            r'([A-Z]{3})\s*[0-9,.]',  # ISO code
+            r'(USD|US\$|\$|EUR|€|GBP|£|CAD|AUD|PHP|INR|SAR|AED|KES)',  # Common symbols
+            r'[0-9,.\s]+([A-Z]{3})\b',  # ISO code after number (lowest priority)
+        ]
 
         # Comprehensive currency symbol to ISO code mapping
         currency_map = {
@@ -745,19 +768,17 @@ class EnhancedInformationExtractor:
             r'[0-9,.\s]+([A-Z]{3})',
         ]
 
+
+        currency = None
         tsi_upper = tsi_string.upper()
 
         for pattern in currency_patterns:
             matches = re.findall(pattern, tsi_upper)
             if matches:
                 found_currency = matches[0]
-                mapped_currency = currency_map.get(found_currency)
-                if mapped_currency:
-                    currency = mapped_currency
-                    break
-                elif len(found_currency) == 3 and found_currency.isalpha():
-                    # Assume valid ISO code if 3 letters
-                    currency = found_currency
+                # Use first valid currency found
+                if found_currency in currency_map or len(found_currency) == 3:
+                    currency = currency_map.get(found_currency, found_currency)
                     break
 
         # Enhanced number extraction with better decimal handling
