@@ -9,6 +9,11 @@ RUN apt-get update && apt-get install -y \
     libmagic1 \
     libmagic-dev \
     file \
+    libgomp1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -16,6 +21,11 @@ WORKDIR /app
 
 # Install minimal requirements as fallback (in case venv mount fails)
 RUN pip install --no-cache-dir uvicorn[standard] fastapi celery redis
+
+# Install project dependencies (ensures PaddleOCR/transformers are available in-container)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir paddlepaddle==2.6.1
 
 # Copy the entire venv from host (will be mounted as volume)
 # This allows us to use pre-installed packages from the host
@@ -30,6 +40,10 @@ RUN mkdir -p uploads
 ENV VIRTUAL_ENV=/app/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV PYTHONPATH=/app
+
+ENV HF_HOME=/app/.cache/huggingface \
+    SENTENCE_TRANSFORMERS_CACHE=/app/.cache/sentence-transformers
+RUN mkdir -p /app/.cache/huggingface /app/.cache/sentence-transformers
 
 # Expose port
 EXPOSE 8000

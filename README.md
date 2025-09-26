@@ -40,7 +40,7 @@ An intelligent system that automates the analysis and decision-making process fo
 
 ### Fast Development Setup (Recommended)
 
-This project is optimized for fast development by mounting your local Python packages into Docker containers, avoiding the need to reinstall heavy ML libraries like PyTorch.
+This project installs backend Python dependencies inside the containers for consistency (no host venv mount). First builds may take longer but avoid version drift (e.g., PaddleOCR/Transformers).
 
 1. **Clone the repository**
    ```bash
@@ -48,37 +48,32 @@ This project is optimized for fast development by mounting your local Python pac
    cd ai-facultative-reinsurance-system
    ```
 
-2. **Set up Python virtual environment**
+2. **Build containers**
    ```bash
-   cd backend
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
+   docker compose build backend celery_worker celery_beat frontend
    ```
 
 3. **Start the development environment**
    ```bash
    # From project root
-   make dev
+   docker compose up -d
    ```
 
 4. **Access the applications**
-   - Frontend: http://localhost:3000
-   - Backend API: http://localhost:8000
-   - API Documentation: http://localhost:8000/docs
+   - Frontend: http://localhost:3005
+   - Backend API: http://localhost:8005
+   - API Documentation: http://localhost:8005/docs
+
+5. **Demo page**
+   - Orchestrate an end-to-end run at: http://localhost:3005/demo
 
 ### Alternative Setup Options
 
-#### Full Container Build (Slower)
-If you prefer complete isolation or don't want to install packages locally:
+If you want hot reloads and quick iteration without manual docker commands, you can still use the provided Makefile aliases (optional):
 ```bash
-make dev-full
-```
-
-#### Validate Local Environment
-To check your Python environment and generate custom configurations:
-```bash
-make setup-local
+make build     # docker compose build ...
+make up        # docker compose up -d
+make logs      # docker compose logs -f
 ```
 
 ## Development Commands
@@ -137,27 +132,17 @@ npm run dev
 
 ## Development Architecture
 
-### Optimized Development Setup
+### Development Notes
 
-This project uses an innovative approach to speed up development by mounting local Python packages into Docker containers:
-
-- **Local Python Environment**: Install heavy ML packages (PyTorch, transformers) once locally
-- **Docker Services**: Run PostgreSQL, Redis, and application containers
-- **Volume Mounting**: Mount local `backend/venv/lib/python3.12/site-packages` into containers
-- **Fast Iteration**: No package reinstallation, instant startup, hot reload
-
-### Benefits
-
-- ⚡ **Fast startup**: Containers start in seconds instead of 30+ minutes
-- 🔄 **Hot reload**: Code changes reflect immediately
-- 💾 **Disk space**: No duplicate package installations
-- 🔧 **Easy debugging**: Use local IDE with installed packages
+- Back-end dependencies (including PaddlePaddle/PaddleOCR and Transformers) are installed in the image.
+- Hugging Face cache is set to `/app/.cache/huggingface` in containers.
+- Celery worker/beat run with container Python (no host venv mount) to prevent version drift.
 
 ## Project Structure
 
 ```
 ├── backend/                 # FastAPI backend
-│   ├── venv/               # Python virtual environment (mounted into containers)
+│   ├── venv/               # Optional local virtual environment (not used by containers)
 │   ├── app/
 │   │   ├── agents/         # AI processing agents
 │   │   ├── api/            # API routes
@@ -187,7 +172,7 @@ This project uses an innovative approach to speed up development by mounting loc
 
 ## API Documentation
 
-Once the backend is running, visit http://localhost:8000/docs for interactive API documentation.
+Once the backend is running, visit http://localhost:8005/docs for interactive API documentation.
 
 ## Testing
 
@@ -203,28 +188,29 @@ cd frontend
 npm test
 ```
 
+## End-to-End Demo Flow
+
+1. **Create Application** (via `/demo` UI or `POST /api/v1/applications/`).
+2. **Upload .msg or PDF/Image** to `/api/v1/documents/upload?application_id=...`.
+3. **Trigger OCR** (optional) `POST /api/v1/documents/{id}/ocr`; status at `GET .../ocr/status`.
+4. **Start Workflow** via `/demo` page or `POST /api/v1/task-monitoring/workflows/start`.
+5. **Generate Report** `POST /api/v1/reports/applications/{application_id}/analysis-report`.
+6. **View Analytics** at `GET /api/v1/analytics/dashboard`.
+
+RI Slip prioritization in attachments prefers Facultative Slip over Placement Slip, with a quality override if Placement quality is significantly higher.
+
 ## Troubleshooting
 
 ### Common Issues
 
 #### Slow Container Builds
-**Problem**: Docker builds taking 30+ minutes
-**Solution**: Use the optimized development setup
-```bash
-# Install packages locally first
-cd backend && pip install -r requirements.txt
-# Then use fast development mode
-make dev
-```
+First builds may be slow due to model/toolchain deps. Subsequent builds will be faster thanks to layer caching.
 
 #### Package Import Errors
-**Problem**: Python packages not found in containers
-**Solution**: Ensure virtual environment exists and is properly mounted
+Rebuild the backend image to ensure dependencies are installed inside the container:
 ```bash
-# Check if venv exists
-ls backend/venv/lib/python3.12/site-packages/
-# If not, create it
-cd backend && python -m venv venv && pip install -r requirements.txt
+docker compose build backend celery_worker celery_beat
+docker compose up -d backend celery_worker celery_beat
 ```
 
 #### Container Permission Issues

@@ -17,16 +17,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Create enum types if they don't exist
-    op.execute("DO $$ BEGIN CREATE TYPE documenttypeenum AS ENUM ('pdf', 'scanned_pdf', 'email', 'excel'); EXCEPTION WHEN duplicate_object THEN null; END $$;")
-    op.execute("DO $$ BEGIN CREATE TYPE risklevelenum AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL'); EXCEPTION WHEN duplicate_object THEN null; END $$;")
-    op.execute("DO $$ BEGIN CREATE TYPE decisiontypeenum AS ENUM ('APPROVE', 'REJECT', 'CONDITIONAL'); EXCEPTION WHEN duplicate_object THEN null; END $$;")
-    op.execute("DO $$ BEGIN CREATE TYPE applicationstatusenum AS ENUM ('pending', 'processing', 'analyzed', 'completed', 'rejected'); EXCEPTION WHEN duplicate_object THEN null; END $$;")
-
     # Create applications table
     op.create_table('applications',
         sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column('status', sa.Enum('PENDING', 'PROCESSING', 'ANALYZED', 'COMPLETED', 'REJECTED', name='applicationstatusenum'), nullable=False),
+        sa.Column('status', sa.Enum('pending', 'processing', 'analyzed', 'completed', 'rejected', name='applicationstatusenum'), nullable=False),
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.Column('updated_at', sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint('id')
@@ -40,7 +34,7 @@ def upgrade() -> None:
         sa.Column('application_id', postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column('filename', sa.String(length=255), nullable=False),
         sa.Column('file_path', sa.Text(), nullable=False),
-        sa.Column('document_type', sa.Enum('PDF', 'SCANNED_PDF', 'EMAIL', 'EXCEL', name='documenttypeenum'), nullable=False),
+        sa.Column('document_type', sa.Enum('pdf', 'scanned_pdf', 'email', 'excel', 'word', 'powerpoint', 'csv', 'image', name='documenttypeenum'), nullable=False),
         sa.Column('processed', sa.Boolean(), nullable=False),
         sa.Column('document_metadata', sa.JSON(), nullable=True),
         sa.Column('upload_timestamp', sa.DateTime(), nullable=False),

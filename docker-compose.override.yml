@@ -8,6 +8,7 @@ services:
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
+      - ./backend/.cache:/app/.cache
       # Mount local virtual environment packages to avoid reinstallation
       - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
     environment:
@@ -30,6 +31,7 @@ services:
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
+      - ./backend/.cache:/app/.cache
       # Mount local virtual environment packages to avoid reinstallation
       - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
     environment:
@@ -44,6 +46,7 @@ services:
       dockerfile: Dockerfile.local
     volumes:
       - ./backend:/app
+      - ./backend/.cache:/app/.cache
       # Mount local virtual environment packages to avoid reinstallation
       - ./backend/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages:ro
     environment:

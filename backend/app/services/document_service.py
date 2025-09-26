@@ -89,7 +89,7 @@ class DocumentService:
             filename=document_data.filename,
             document_type=document_data.document_type,
             file_path=document_data.file_path,
-            metadata=document_data.metadata,
+            document_metadata=document_data.metadata,
             processed=False,
             upload_timestamp=datetime.utcnow()
         )
@@ -107,8 +107,8 @@ class DocumentService:
             )
             
             # Update metadata with task information
-            db_document.metadata = {
-                **db_document.metadata,
+            db_document.document_metadata = {
+                **(db_document.document_metadata or {}),
                 'processing_task_id': task.id,
                 'processing_status': 'queued',
                 'processing_queued_at': datetime.utcnow().isoformat()
@@ -120,14 +120,14 @@ class DocumentService:
             print(f"Failed to queue OCR processing for document {document_id}: {str(e)}")
         
         return DocumentResponse(
-            id=db_document.id,
-            application_id=db_document.application_id,
+            id=str(db_document.id),
+            application_id=str(db_document.application_id) if db_document.application_id else None,
             filename=db_document.filename,
             document_type=db_document.document_type,
             file_path=db_document.file_path,
             processed=db_document.processed,
             upload_timestamp=db_document.upload_timestamp,
-            metadata=db_document.metadata
+            metadata=db_document.document_metadata or {}
         )
     
     async def get_document(self, db: AsyncSession, document_id: str) -> Optional[DocumentResponse]:
@@ -141,14 +141,14 @@ class DocumentService:
             return None
         
         return DocumentResponse(
-            id=db_document.id,
-            application_id=db_document.application_id,
+            id=str(db_document.id),
+            application_id=str(db_document.application_id) if db_document.application_id else None,
             filename=db_document.filename,
             document_type=db_document.document_type,
             file_path=db_document.file_path,
             processed=db_document.processed,
             upload_timestamp=db_document.upload_timestamp,
-            metadata=db_document.metadata
+            metadata=db_document.document_metadata or {}
         )
     
     async def get_document_content(self, db: AsyncSession, document_id: str) -> bytes:
@@ -213,14 +213,14 @@ class DocumentService:
         await db.refresh(db_document)
         
         return DocumentResponse(
-            id=db_document.id,
-            application_id=db_document.application_id,
+            id=str(db_document.id),
+            application_id=str(db_document.application_id) if db_document.application_id else None,
             filename=db_document.filename,
             document_type=db_document.document_type,
             file_path=db_document.file_path,
             processed=db_document.processed,
             upload_timestamp=db_document.upload_timestamp,
-            metadata=db_document.metadata
+            metadata=db_document.document_metadata or {}
         )
     
     async def list_documents(self, db: AsyncSession, application_id: Optional[str] = None,
@@ -237,14 +237,14 @@ class DocumentService:
         
         return [
             DocumentResponse(
-                id=doc.id,
-                application_id=doc.application_id,
+                id=str(doc.id),
+                application_id=str(doc.application_id) if doc.application_id else None,
                 filename=doc.filename,
                 document_type=doc.document_type,
                 file_path=doc.file_path,
                 processed=doc.processed,
                 upload_timestamp=doc.upload_timestamp,
-                metadata=doc.metadata
+                metadata=doc.document_metadata or {}
             )
             for doc in documents
         ]
@@ -297,10 +297,15 @@ class DocumentService:
         
         try:
             # Queue OCR processing task
+            # Normalize document_type to string in case it's already a string from DB
+            doc_type_value = (
+                document.document_type.value
+                if hasattr(document.document_type, 'value') else document.document_type
+            )
             task = process_document_ocr.delay(
                 document_id=document_id,
                 file_path=document.file_path,
-                document_type=document.document_type.value
+                document_type=doc_type_value
             )
             
             # Update document metadata

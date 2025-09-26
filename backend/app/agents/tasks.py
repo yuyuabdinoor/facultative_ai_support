@@ -29,7 +29,7 @@ def celery_task(*args, **kwargs):
             # Return the function as-is if Celery is not available
             return func
     return decorator
-from app.agents.ocr_agent import ocr_agent, OCRResult, EmailContent, ExcelData
+from app.agents.ocr_agent import ocr_agent, OCRResult, EmailContent, ExcelData, WordDocumentData, PowerPointData, AttachmentData
 from app.models.database import Document
 from app.core.database import get_db
 from sqlalchemy.orm import Session

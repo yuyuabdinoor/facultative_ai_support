@@ -8,52 +8,7 @@ The AI-Powered Facultative Reinsurance Decision Support System is designed as a 
 
 ### High-Level Architecture
 
-```mermaid
-graph TB
-    subgraph "Frontend Layer"
-        UI[NextJS Web Application]
-        UI --> API[API Gateway]
-    end
-    
-    subgraph "API Layer"
-        API --> AUTH[Authentication Service]
-        API --> UPLOAD[Document Upload Service]
-        API --> PROCESS[Processing Orchestrator]
-        API --> RESULTS[Results Service]
-    end
-    
-    subgraph "Processing Layer"
-        PROCESS --> OCR[OCR Processing Agent]
-        PROCESS --> EXTRACT[Data Extraction Agent]
-        PROCESS --> RISK[Risk Analysis Agent]
-        PROCESS --> LIMITS[Limits Validation Agent]
-        PROCESS --> DECISION[Decision Engine Agent]
-        PROCESS --> MARKET[Market Grouping Agent]
-    end
-    
-    subgraph "Data Layer"
-        DB[(PostgreSQL Database)]
-        REDIS[(Redis Cache)]
-        FILES[File Storage]
-        MODELS[Model Registry]
-    end
-    
-    subgraph "External Services"
-        CELERY[Celery Task Queue]
-        MONITOR[Monitoring & Logging]
-    end
-    
-    OCR --> DB
-    EXTRACT --> DB
-    RISK --> DB
-    LIMITS --> DB
-    DECISION --> DB
-    MARKET --> DB
-    
-    PROCESS --> CELERY
-    API --> REDIS
-    UPLOAD --> FILES
-```
+![High-Level Architecture](image.png)
 
 ### Technology Stack
 
@@ -609,7 +564,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8005
   
   db:
     image: postgres:15

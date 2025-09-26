@@ -1,460 +1,473 @@
 """
-Unit tests for the Data Extraction Agent
+Test suite for Data Extraction Agent
+
+Tests the comprehensive data extraction capabilities including:
+- Email processing with attachments
+- Financial data extraction
+- Risk data extraction
+- Excel report generation
+- Integration with OCR agent
 """
 
 import pytest
-import asyncio
+import tempfile
+import os
+from datetime import datetime
 from decimal import Decimal
-from unittest.mock import Mock, patch, AsyncMock
-import torch
+from unittest.mock import Mock, patch, MagicMock
 
-from app.agents.data_extraction_agent import DataExtractionAgent
-from app.models.schemas import RiskParameters, FinancialData, ValidationResult, ExtractionResult
+from app.agents.data_extraction_agent import (
+    DataExtractionAgent, ExtractedData, FinancialData, RiskData, PartyData,
+    data_extraction_agent
+)
+from app.agents.ocr_agent import (
+    EmailContent, AttachmentData, OCRResult, WordDocumentData, 
+    ExcelData, PowerPointData, TextRegion
+)
 
 
 class TestDataExtractionAgent:
     """Test cases for DataExtractionAgent"""
     
     @pytest.fixture
-    def mock_models(self):
-        """Mock the Hugging Face models to avoid loading them in tests"""
-        with patch('app.agents.data_extraction_agent.AutoTokenizer'), \
-             patch('app.agents.data_extraction_agent.AutoModelForTokenClassification'), \
-             patch('app.agents.data_extraction_agent.AutoModel'), \
-             patch('app.agents.data_extraction_agent.pipeline'), \
-             patch('app.agents.data_extraction_agent.SentenceTransformer'):
-            yield
+    def agent(self):
+        """Create a data extraction agent instance for testing"""
+        return DataExtractionAgent()
     
     @pytest.fixture
-    def agent(self, mock_models):
-        """Create a DataExtractionAgent instance with mocked models"""
-        agent = DataExtractionAgent()
+    def sample_email_content(self):
+        """Create sample email content for testing"""
+        # Sample OCR result for attachment
+        ocr_result = OCRResult(
+            text="Policy Number: FAC-2024-001\nSum Insured: USD 5,000,000\nInsured: ABC Manufacturing Ltd\nLocation: New York, USA\nCoverage: Property Insurance",
+            confidence=0.95,
+            regions=[
+                TextRegion(text="Policy Number: FAC-2024-001", confidence=0.98, bbox=[0, 0, 100, 20]),
+                TextRegion(text="Sum Insured: USD 5,000,000", confidence=0.96, bbox=[0, 20, 100, 40])
+            ],
+            metadata={'file_type': 'pdf'},
+            processing_time=2.5,
+            success=True
+        )
         
-        # Mock the models to avoid actual inference
-        agent.ner_model = Mock()
-        agent.ner_tokenizer = Mock()
-        agent.finbert_model = Mock()
-        agent.finbert_tokenizer = Mock()
-        agent.financial_classifier = Mock()
-        agent.layout_model = Mock()
-        agent.layout_tokenizer = Mock()
-        agent.zero_shot_classifier = Mock()
-        agent.embeddings_model = Mock()
-        agent.device = torch.device("cpu")
+        # Sample attachment
+        attachment = AttachmentData(
+            filename="policy_details.pdf",
+            content_type=".pdf",
+            size=1024000,
+            processed_content=ocr_result,
+            extraction_success=True
+        )
         
-        return agent
+        # Sample email
+        return EmailContent(
+            subject="Facultative Reinsurance Placement - ABC Manufacturing",
+            sender="broker@example.com",
+            recipients=["underwriter@reinsurer.com"],
+            body="Please find attached the placement details for ABC Manufacturing property risk.",
+            attachments=[attachment],
+            date=datetime(2024, 1, 15),
+            metadata={'message_class': 'IPM.Note'},
+            document_type="risk_placement"
+        )
     
-    @pytest.mark.asyncio
-    async def test_extract_risk_parameters_basic(self, agent):
-        """Test basic risk parameter extraction"""
-        # Mock the helper methods
-        agent._extract_ner_entities = AsyncMock(return_value=[
-            {'word': 'New York', 'label': 'LOC', 'confidence': 0.95}
-        ])
-        agent._extract_pattern_data = Mock(return_value={
-            'asset_value': Decimal('1000000'),
-            'construction_type': 'steel'
-        })
-        agent._classify_asset_type = AsyncMock(return_value={
-            'asset_type': 'commercial building',
-            'asset_type_confidence': 0.85
-        })
-        
-        text = "Commercial building in New York with asset value of $1,000,000"
-        
-        risk_params, confidence_scores = await agent.extract_risk_parameters(text)
-        
-        assert isinstance(risk_params, RiskParameters)
-        assert risk_params.location == 'New York'
-        assert risk_params.asset_value == Decimal('1000000')
-        assert risk_params.asset_type == 'commercial building'
-        assert risk_params.construction_type == 'steel'
-        assert 'location' in confidence_scores
-        assert confidence_scores['location'] == 0.95
+    @pytest.fixture
+    def sample_word_document(self):
+        """Create sample Word document data"""
+        return WordDocumentData(
+            text="Risk Assessment Report\nInsured: XYZ Corporation\nSum Insured: EUR 10,000,000\nLocation: London, UK",
+            paragraphs=[
+                "Risk Assessment Report",
+                "Insured: XYZ Corporation", 
+                "Sum Insured: EUR 10,000,000",
+                "Location: London, UK"
+            ],
+            tables=[
+                [
+                    ["Field", "Value"],
+                    ["Policy Number", "POL-2024-002"],
+                    ["Premium", "EUR 50,000"],
+                    ["Deductible", "EUR 25,000"]
+                ]
+            ],
+            metadata={'file_format': '.docx'}
+        )
     
-    @pytest.mark.asyncio
-    async def test_extract_financial_data_basic(self, agent):
-        """Test basic financial data extraction"""
-        # Mock the helper methods
-        agent._extract_financial_amounts = Mock(return_value={
-            'revenue': Decimal('5000000'),
-            'assets': Decimal('10000000')
-        })
-        agent._extract_credit_rating = Mock(return_value='AA')
-        agent._analyze_financial_sentiment = AsyncMock(return_value={
-            'label': 'positive',
-            'score': 0.85
-        })
+    def test_initialization(self, agent):
+        """Test agent initialization"""
+        assert agent is not None
+        assert hasattr(agent, 'patterns')
+        assert hasattr(agent, 'keywords')
+        assert hasattr(agent, 'excel_template')
         
-        text = "Company has annual revenue of $5M and total assets of $10M with AA credit rating"
+        # Check patterns are compiled
+        assert 'currency_amount' in agent.patterns
+        assert 'policy_number' in agent.patterns
         
-        financial_data, confidence_scores = await agent.extract_financial_data(text)
-        
-        assert isinstance(financial_data, FinancialData)
-        assert financial_data.revenue == Decimal('5000000')
-        assert financial_data.assets == Decimal('10000000')
-        assert financial_data.credit_rating == 'AA'
-        assert financial_data.financial_strength_rating == 'positive'
-        assert 'credit_rating' in confidence_scores
-        assert confidence_scores['credit_rating'] == 0.9
+        # Check keywords are loaded
+        assert 'document_types' in agent.keywords
+        assert 'coverage_types' in agent.keywords
     
-    @pytest.mark.asyncio
-    async def test_extract_geographic_info(self, agent):
-        """Test geographic information extraction"""
-        # Mock zero-shot classifier
-        agent.zero_shot_classifier.return_value = {
-            'labels': ['North America'],
-            'scores': [0.85]
-        }
+    def test_extract_from_email(self, agent, sample_email_content):
+        """Test extraction from email content"""
+        result = agent.extract_from_email(sample_email_content)
         
-        text = "Property located at 123 Main Street, New York, NY, United States"
+        assert isinstance(result, ExtractedData)
+        assert result.document_type == "risk_placement"
+        assert result.confidence_score > 0
         
-        geo_info = await agent.extract_geographic_info(text)
-        
-        assert 'addresses' in geo_info
-        assert 'cities' in geo_info
-        assert 'countries' in geo_info
-        assert 'region' in geo_info
-        assert geo_info['region'] == 'North America'
-        assert geo_info['region_confidence'] == 0.85
+        # Check if data was extracted from attachment
+        assert result.financial.sum_insured is not None
+        assert result.financial.currency == "USD"
+        assert result.insured is not None
+        assert result.risk.location is not None
     
-    @pytest.mark.asyncio
-    async def test_classify_asset_type(self, agent):
-        """Test asset type classification"""
-        # Mock zero-shot classifier
-        agent.zero_shot_classifier.return_value = {
-            'labels': ['office building'],
-            'scores': [0.75]
-        }
-        
-        description = "Modern office building with multiple floors"
-        
-        result = await agent.classify_asset_type(description)
-        
-        assert 'asset_type' in result
-        assert result['asset_type'] == 'office building'
-        assert result['asset_type_confidence'] == 0.75
-    
-    @pytest.mark.asyncio
-    async def test_validate_extracted_data_valid(self, agent):
-        """Test validation with valid data"""
-        data = {
-            'asset_type': 'office building',
-            'location': 'New York',
-            'asset_value': 1000000,
-            'coverage_limit': 800000,
-            'credit_rating': 'AA'
-        }
-        
-        result = await agent.validate_extracted_data(data)
-        
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid is True
-        assert len(result.errors) == 0
-    
-    @pytest.mark.asyncio
-    async def test_validate_extracted_data_invalid(self, agent):
-        """Test validation with invalid data"""
-        data = {
-            'asset_value': 20_000_000_000,  # Exceeds max range
-            'coverage_limit': 1000000,
-            'credit_rating': 'INVALID'  # Invalid rating
-        }
-        
-        result = await agent.validate_extracted_data(data)
-        
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid is False
-        assert len(result.errors) >= 2  # Missing required fields + invalid asset value
-        assert len(result.warnings) >= 1  # Invalid credit rating
-    
-    @pytest.mark.asyncio
-    async def test_validate_extracted_data_warnings(self, agent):
-        """Test validation with data that generates warnings"""
-        data = {
-            'asset_type': 'office building',
-            'location': 'New York',
-            'asset_value': 800000,
-            'coverage_limit': 1000000,  # Exceeds asset value
-        }
-        
-        result = await agent.validate_extracted_data(data)
-        
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid is True  # No errors, just warnings
-        assert len(result.warnings) >= 1
-        assert any('exceeds asset value' in warning for warning in result.warnings)
-    
-    @pytest.mark.asyncio
-    async def test_process_document_text_complete(self, agent):
-        """Test complete document text processing"""
-        # Mock all the extraction methods
-        agent.extract_risk_parameters = AsyncMock(return_value=(
-            RiskParameters(
-                id="test",
-                application_id="test",
-                asset_value=Decimal('1000000'),
-                asset_type='office building',
-                location='New York'
-            ),
-            {'location': 0.95}
-        ))
-        
-        agent.extract_financial_data = AsyncMock(return_value=(
-            FinancialData(
-                id="test",
-                application_id="test",
-                revenue=Decimal('5000000'),
-                credit_rating='AA'
-            ),
-            {'credit_rating': 0.9}
-        ))
-        
-        agent.extract_geographic_info = AsyncMock(return_value={
-            'region': 'North America'
-        })
-        
-        agent.validate_extracted_data = AsyncMock(return_value=ValidationResult(
-            is_valid=True,
-            errors=[],
-            warnings=[]
-        ))
-        
-        text = "Office building in New York with $1M asset value, company revenue $5M, AA rated"
-        
-        result = await agent.process_document_text(text)
-        
-        assert isinstance(result, ExtractionResult)
-        assert 'risk_parameters' in result.extracted_data
-        assert 'financial_data' in result.extracted_data
-        assert 'geographic_info' in result.extracted_data
-        assert result.validation_result.is_valid is True
-        assert len(result.confidence_scores) >= 2
-    
-    def test_parse_currency_amount_basic(self, agent):
-        """Test currency amount parsing"""
-        # Test basic amounts
-        assert agent._parse_currency_amount("$1,000,000") == Decimal('1000000')
-        assert agent._parse_currency_amount("€500,000") == Decimal('500000')
-        assert agent._parse_currency_amount("1.5 million") == Decimal('1500000')
-        assert agent._parse_currency_amount("2.5B") == Decimal('2500000000')
-    
-    def test_parse_currency_amount_edge_cases(self, agent):
-        """Test currency amount parsing edge cases"""
-        # Test edge cases
-        assert agent._parse_currency_amount("") is None
-        assert agent._parse_currency_amount("invalid") is None
-        assert agent._parse_currency_amount("$0") == Decimal('0')
-    
-    def test_extract_pattern_data(self, agent):
-        """Test pattern-based data extraction"""
+    def test_extract_from_text_patterns(self, agent):
+        """Test pattern-based text extraction"""
         text = """
-        Asset value: $2,500,000
-        Coverage limit: $2,000,000
-        Construction: steel frame
-        Occupancy: office
+        Policy Reference: FAC-2024-123
+        Insured: Global Industries Inc.
+        Sum Insured: USD 15,000,000
+        Premium: USD 75,000
+        Location: Chicago, Illinois
+        Coverage: Property & Casualty
+        Date: 15/01/2024
         """
         
-        result = agent._extract_pattern_data(text)
+        extracted_data = ExtractedData()
+        agent._extract_from_text(text, extracted_data)
         
-        assert 'asset_value' in result
-        assert 'coverage_limit' in result
-        assert 'construction_type' in result
-        assert 'occupancy' in result
-        assert result['construction_type'] == 'steel'
-        assert result['occupancy'] == 'office'
+        assert extracted_data.reference_number == "FAC-2024-123"
+        assert extracted_data.financial.currency == "USD"
+        assert extracted_data.risk.location is not None
+        assert extracted_data.date is not None
     
-    def test_extract_financial_amounts(self, agent):
-        """Test financial amount extraction"""
-        text = """
-        Annual revenue: $10 million
-        Total assets: $50M
-        Liabilities: $20 million
-        """
-        
-        result = agent._extract_financial_amounts(text)
-        
-        assert 'revenue' in result
-        assert 'assets' in result
-        assert 'liabilities' in result
-        assert result['revenue'] == Decimal('10000000')
-        assert result['assets'] == Decimal('50000000')
-        assert result['liabilities'] == Decimal('20000000')
-    
-    def test_extract_credit_rating(self, agent):
-        """Test credit rating extraction"""
-        text = "The company has a credit rating of AA+ from Standard & Poor's"
-        
-        result = agent._extract_credit_rating(text)
-        
-        assert result == 'AA+'
-    
-    def test_extract_credit_rating_not_found(self, agent):
-        """Test credit rating extraction when not found"""
-        text = "No credit rating information available"
-        
-        result = agent._extract_credit_rating(text)
-        
-        assert result is None
-    
-    @pytest.mark.asyncio
-    async def test_extract_ner_entities_mocked(self, agent):
-        """Test NER entity extraction with mocked model"""
-        # Mock the tokenizer and model outputs
-        agent.ner_tokenizer.return_value = {
-            'input_ids': torch.tensor([[101, 1234, 5678, 102]]),  # Mock token IDs
-            'attention_mask': torch.tensor([[1, 1, 1, 1]])
-        }
-        agent.ner_tokenizer.convert_ids_to_tokens.return_value = ['[CLS]', 'New', 'York', '[SEP]']
-        
-        # Mock model output
-        mock_logits = torch.randn(1, 4, 9)  # Batch, sequence, num_labels
-        mock_output = Mock()
-        mock_output.logits = mock_logits
-        agent.ner_model.return_value = mock_output
-        agent.ner_model.config.id2label = {0: 'O', 1: 'B-LOC', 2: 'I-LOC'}
-        
-        text = "New York"
-        
-        entities = await agent._extract_ner_entities(text)
-        
-        assert isinstance(entities, list)
-        # The exact results depend on the mocked outputs, but we verify the structure
-        for entity in entities:
-            assert 'word' in entity
-            assert 'label' in entity
-            assert 'confidence' in entity
-    
-    @pytest.mark.asyncio
-    async def test_analyze_financial_sentiment_mocked(self, agent):
-        """Test financial sentiment analysis with mocked classifier"""
-        agent.financial_classifier.return_value = [
-            {'label': 'positive', 'score': 0.85}
+    def test_extract_from_table(self, agent):
+        """Test extraction from table data"""
+        table = [
+            ["Field", "Value", "Currency"],
+            ["Sum Insured", "5000000", "USD"],
+            ["Premium", "25000", "USD"],
+            ["Deductible", "10000", "USD"],
+            ["Insured", "Test Company Ltd", ""],
+            ["Broker", "Test Broker Inc", ""]
         ]
         
-        text = "The company reported strong financial performance with increased profits"
+        extracted_data = ExtractedData()
+        agent._extract_from_table(table, extracted_data)
         
-        result = await agent._analyze_financial_sentiment(text)
-        
-        assert result is not None
-        assert result['label'] == 'positive'
-        assert result['score'] == 0.85
+        assert extracted_data.financial.sum_insured == Decimal('5000000')
+        assert extracted_data.financial.premium == Decimal('25000')
+        assert extracted_data.financial.deductible == Decimal('10000')
+        assert extracted_data.insured == "Test Company Ltd"
+        assert extracted_data.broker == "Test Broker Inc"
     
-    @pytest.mark.asyncio
-    async def test_analyze_financial_sentiment_no_financial_content(self, agent):
-        """Test financial sentiment analysis with no financial content"""
-        text = "This is a general description without financial information"
+    def test_extract_from_excel_sheet(self, agent):
+        """Test extraction from Excel sheet data"""
+        sheet_data = [
+            {
+                "Policy Number": "EXL-2024-001",
+                "Insured": "Excel Test Corp",
+                "Sum Insured": 8000000,
+                "Currency": "EUR",
+                "Location": "Paris, France"
+            },
+            {
+                "Policy Number": "EXL-2024-002", 
+                "Insured": "Another Corp",
+                "Sum Insured": 12000000,
+                "Currency": "GBP",
+                "Location": "London, UK"
+            }
+        ]
         
-        result = await agent._analyze_financial_sentiment(text)
+        extracted_data = ExtractedData()
+        agent._extract_from_excel_sheet(sheet_data, extracted_data)
         
-        assert result is None
+        assert extracted_data.insured == "Excel Test Corp"
+        assert extracted_data.financial.sum_insured == Decimal('8000000')
     
-    def test_initialization_patterns(self, agent):
-        """Test that patterns are properly initialized"""
-        assert hasattr(agent, 'patterns')
-        assert 'currency_amounts' in agent.patterns
-        assert 'asset_values' in agent.patterns
-        assert 'credit_ratings' in agent.patterns
+    def test_parse_amount(self, agent):
+        """Test monetary amount parsing"""
+        test_cases = [
+            ("USD 1,000,000", Decimal('1000000')),
+            ("EUR 500,000.50", Decimal('500000.50')),
+            ("GBP 2,500,000", Decimal('2500000')),
+            ("$1,234,567.89", Decimal('1234567.89')),
+            ("invalid", None),
+            ("", None)
+        ]
         
-        # Test that patterns are compiled regex objects
-        import re
-        assert isinstance(agent.patterns['currency_amounts'], re.Pattern)
+        for amount_text, expected in test_cases:
+            result = agent._parse_amount(amount_text)
+            assert result == expected
     
-    def test_initialization_validation_rules(self, agent):
-        """Test that validation rules are properly initialized"""
-        assert hasattr(agent, 'validation_rules')
-        assert 'asset_value_range' in agent.validation_rules
-        assert 'required_fields' in agent.validation_rules
-        assert 'valid_credit_ratings' in agent.validation_rules
+    def test_parse_date(self, agent):
+        """Test date parsing"""
+        test_cases = [
+            ("15/01/2024", datetime(2024, 1, 15)),
+            ("01-15-2024", datetime(2024, 1, 15)),
+            ("2024-01-15", datetime(2024, 1, 15)),
+            ("15 Jan 2024", datetime(2024, 1, 15)),
+            ("Jan 15, 2024", datetime(2024, 1, 15)),
+            ("invalid date", None)
+        ]
         
-        # Test validation rule values
-        assert agent.validation_rules['asset_value_range'] == (0, 10_000_000_000)
-        assert 'asset_type' in agent.validation_rules['required_fields']
-        assert 'AAA' in agent.validation_rules['valid_credit_ratings']
+        for date_text, expected in test_cases:
+            result = agent._parse_date(date_text)
+            if expected:
+                assert result == expected
+            else:
+                assert result is None
+    
+    def test_calculate_confidence(self, agent):
+        """Test confidence score calculation"""
+        # Complete data
+        complete_data = ExtractedData(
+            reference_number="TEST-001",
+            insured="Test Company",
+            document_type="risk_placement",
+            date=datetime.now()
+        )
+        complete_data.financial.sum_insured = Decimal('1000000')
+        complete_data.financial.currency = "USD"
+        complete_data.risk.location = "New York"
+        complete_data.broker = "Test Broker"
+        
+        score = agent._calculate_confidence(complete_data)
+        assert score > 0.8  # Should have high confidence
+        
+        # Minimal data
+        minimal_data = ExtractedData()
+        score = agent._calculate_confidence(minimal_data)
+        assert score < 0.2  # Should have low confidence
+    
+    def test_generate_excel_report(self, agent):
+        """Test Excel report generation"""
+        # Create sample extracted data
+        data1 = ExtractedData(
+            reference_number="TEST-001",
+            insured="Test Company 1",
+            broker="Test Broker",
+            document_type="risk_placement",
+            date=datetime(2024, 1, 15),
+            line_of_business="property",
+            confidence_score=0.85
+        )
+        data1.financial.sum_insured = Decimal('1000000')
+        data1.financial.currency = "USD"
+        data1.financial.premium = Decimal('5000')
+        data1.risk.location = "New York"
+        
+        data2 = ExtractedData(
+            reference_number="TEST-002",
+            insured="Test Company 2",
+            broker="Another Broker",
+            document_type="treaty_slip",
+            date=datetime(2024, 1, 16),
+            line_of_business="casualty",
+            confidence_score=0.92
+        )
+        data2.financial.sum_insured = Decimal('2000000')
+        data2.financial.currency = "EUR"
+        data2.risk.location = "London"
+        
+        extracted_data_list = [data1, data2]
+        
+        # Generate report
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
+            output_path = tmp_file.name
+        
+        try:
+            result_path = agent.generate_excel_report(extracted_data_list, output_path)
+            assert result_path == output_path
+            assert os.path.exists(output_path)
+            
+            # Verify file is not empty
+            assert os.path.getsize(output_path) > 0
+            
+        finally:
+            # Clean up
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+    
+    @patch('app.agents.data_extraction_agent.ocr_agent')
+    def test_process_documents(self, mock_ocr_agent, agent):
+        """Test processing multiple documents"""
+        # Mock OCR agent responses
+        mock_email = EmailContent(
+            subject="Test Email",
+            sender="test@example.com",
+            body="Test body",
+            attachments=[],
+            date=datetime.now(),
+            document_type="risk_placement"
+        )
+        
+        mock_ocr_result = OCRResult(
+            text="Test OCR text with USD 1,000,000 sum insured",
+            confidence=0.9,
+            regions=[],
+            metadata={},
+            processing_time=1.0,
+            success=True
+        )
+        
+        mock_ocr_agent.process_document.side_effect = [mock_email, mock_ocr_result]
+        
+        file_paths = ["test1.msg", "test2.pdf"]
+        results = agent.process_documents(file_paths)
+        
+        assert len(results) == 2
+        assert all(isinstance(result, ExtractedData) for result in results)
+        assert mock_ocr_agent.process_document.call_count == 2
+    
+    def test_financial_data_model(self):
+        """Test FinancialData model"""
+        financial = FinancialData(
+            sum_insured=Decimal('1000000'),
+            premium=Decimal('5000'),
+            currency="USD",
+            coverage_type="property"
+        )
+        
+        assert financial.sum_insured == Decimal('1000000')
+        assert financial.premium == Decimal('5000')
+        assert financial.currency == "USD"
+        assert financial.coverage_type == "property"
+    
+    def test_risk_data_model(self):
+        """Test RiskData model"""
+        risk = RiskData(
+            risk_type="property",
+            location="New York",
+            country="USA",
+            industry="manufacturing",
+            year_built=2010
+        )
+        
+        assert risk.risk_type == "property"
+        assert risk.location == "New York"
+        assert risk.country == "USA"
+        assert risk.industry == "manufacturing"
+        assert risk.year_built == 2010
+    
+    def test_party_data_model(self):
+        """Test PartyData model"""
+        party = PartyData(
+            name="John Doe",
+            email="john@example.com",
+            role="broker",
+            phone="+1-555-0123"
+        )
+        
+        assert party.name == "John Doe"
+        assert party.email == "john@example.com"
+        assert party.role == "broker"
+        assert party.phone == "+1-555-0123"
+    
+    def test_extracted_data_model(self):
+        """Test ExtractedData model"""
+        data = ExtractedData(
+            reference_number="TEST-001",
+            document_type="risk_placement",
+            date=datetime(2024, 1, 15),
+            confidence_score=0.85,
+            extraction_method="hybrid"
+        )
+        
+        assert data.reference_number == "TEST-001"
+        assert data.document_type == "risk_placement"
+        assert data.date == datetime(2024, 1, 15)
+        assert data.confidence_score == 0.85
+        assert data.extraction_method == "hybrid"
+        assert isinstance(data.financial, FinancialData)
+        assert isinstance(data.risk, RiskData)
+        assert isinstance(data.parties, list)
+    
+    def test_global_agent_instance(self):
+        """Test global agent instance"""
+        assert data_extraction_agent is not None
+        assert isinstance(data_extraction_agent, DataExtractionAgent)
 
 
-class TestDataExtractionAgentIntegration:
-    """Integration tests that test multiple components together"""
+class TestIntegrationWithOCRAgent:
+    """Integration tests with OCR Agent"""
     
-    @pytest.fixture
-    def agent(self, mock_models):
-        """Create agent for integration tests"""
+    def test_email_with_word_attachment(self):
+        """Test processing email with Word document attachment"""
+        word_doc = WordDocumentData(
+            text="Policy Details\nInsured: Integration Test Corp\nSum Insured: USD 3,000,000",
+            paragraphs=["Policy Details", "Insured: Integration Test Corp"],
+            tables=[],
+            metadata={'file_format': '.docx'}
+        )
+        
+        attachment = AttachmentData(
+            filename="policy.docx",
+            content_type=".docx",
+            size=50000,
+            processed_content=word_doc,
+            extraction_success=True
+        )
+        
+        email = EmailContent(
+            subject="Policy Attachment Test",
+            sender="test@broker.com",
+            body="Please review attached policy",
+            attachments=[attachment],
+            date=datetime.now(),
+            document_type="risk_placement"
+        )
+        
         agent = DataExtractionAgent()
+        result = agent.extract_from_email(email)
         
-        # Mock models but allow pattern matching to work
-        agent.ner_model = Mock()
-        agent.ner_tokenizer = Mock()
-        agent.finbert_model = Mock()
-        agent.finbert_tokenizer = Mock()
-        agent.financial_classifier = Mock()
-        agent.layout_model = Mock()
-        agent.layout_tokenizer = Mock()
-        agent.zero_shot_classifier = Mock()
-        agent.embeddings_model = Mock()
-        agent.device = torch.device("cpu")
-        
-        return agent
+        assert result.insured == "Integration Test Corp"
+        assert result.financial.sum_insured == Decimal('3000000')
+        assert result.financial.currency == "USD"
     
-    def test_pattern_extraction_integration(self, agent):
-        """Test that pattern extraction works with realistic text"""
-        text = """
-        PROPERTY DETAILS:
-        Asset Value: $5,500,000
-        Coverage Limit: $5,000,000
-        Location: 123 Business Park Drive, Atlanta, GA
-        Construction: Steel frame with concrete floors
-        Occupancy: Office building
+    def test_email_with_excel_attachment(self):
+        """Test processing email with Excel attachment"""
+        excel_data = ExcelData(
+            sheets={
+                "Policy Data": [
+                    {
+                        "Reference": "EXL-INT-001",
+                        "Insured": "Excel Integration Corp",
+                        "Sum Insured": 5000000,
+                        "Currency": "EUR",
+                        "Premium": 25000
+                    }
+                ]
+            },
+            metadata={'file_format': '.xlsx'},
+            total_rows=1,
+            total_sheets=1
+        )
         
-        FINANCIAL INFORMATION:
-        Annual Revenue: $25 million
-        Total Assets: $100M
-        Credit Rating: A+
-        """
+        attachment = AttachmentData(
+            filename="data.xlsx",
+            content_type=".xlsx",
+            size=75000,
+            processed_content=excel_data,
+            extraction_success=True
+        )
         
-        # Test pattern extraction
-        pattern_data = agent._extract_pattern_data(text)
-        financial_data = agent._extract_financial_amounts(text)
-        credit_rating = agent._extract_credit_rating(text)
+        email = EmailContent(
+            subject="Excel Data Test",
+            sender="data@broker.com",
+            body="Excel data attached",
+            attachments=[attachment],
+            date=datetime.now(),
+            document_type="treaty_slip"
+        )
         
-        # Verify extracted data
-        assert pattern_data['asset_value'] == Decimal('5500000')
-        assert pattern_data['coverage_limit'] == Decimal('5000000')
-        assert pattern_data['construction_type'] == 'steel'
-        assert pattern_data['occupancy'] == 'office'
+        agent = DataExtractionAgent()
+        result = agent.extract_from_email(email)
         
-        assert financial_data['revenue'] == Decimal('25000000')
-        assert financial_data['assets'] == Decimal('100000000')
-        
-        assert credit_rating == 'A+'
-    
-    @pytest.mark.asyncio
-    async def test_validation_integration(self, agent):
-        """Test validation with realistic extracted data"""
-        # Valid data
-        valid_data = {
-            'asset_type': 'office building',
-            'location': 'Atlanta, GA',
-            'asset_value': 5500000,
-            'coverage_limit': 5000000,
-            'revenue': 25000000,
-            'credit_rating': 'A+'
-        }
-        
-        result = await agent.validate_extracted_data(valid_data)
-        assert result.is_valid is True
-        assert len(result.errors) == 0
-        
-        # Invalid data
-        invalid_data = {
-            'asset_value': 15_000_000_000,  # Too high
-            'coverage_limit': 5000000,
-            'credit_rating': 'INVALID'
-        }
-        
-        result = await agent.validate_extracted_data(invalid_data)
-        assert result.is_valid is False
-        assert len(result.errors) >= 2  # Missing required fields + invalid asset value
-        assert len(result.warnings) >= 1  # Invalid credit rating
+        assert result.insured == "Excel Integration Corp"
+        assert result.financial.sum_insured == Decimal('5000000')
 
 
 if __name__ == "__main__":

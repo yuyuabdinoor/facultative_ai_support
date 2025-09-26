@@ -2,9 +2,10 @@
 Database connection and session management
 """
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
-from typing import Generator
+from typing import Generator, AsyncGenerator
 import logging
 
 from app.core.config import settings
@@ -12,14 +13,35 @@ from app.models.database import Base
 
 logger = logging.getLogger(__name__)
 
-# Create database engine
+# Create async database engine
+async_engine = create_async_engine(
+    settings.database_url.replace("postgresql://", "postgresql+asyncpg://"),
+    pool_pre_ping=True,
+    echo=False,  # Set to True for SQL query logging in development
+    connect_args={
+        "server_settings": {
+            "application_name": "reinsurance_backend",
+        },
+        # Disable SSL for local development to avoid certificate issues
+        "ssl": False,
+    }
+)
+
+# Create async session factory
+AsyncSessionLocal = async_sessionmaker(
+    async_engine,
+    class_=AsyncSession,
+    expire_on_commit=False
+)
+
+# Create synchronous database engine (for migrations and other sync operations)
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
     echo=False,  # Set to True for SQL query logging in development
 )
 
-# Create session factory
+# Create sync session factory (for migrations)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -33,9 +55,19 @@ def create_tables():
         raise
 
 
-def get_db() -> Generator[Session, None, None]:
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Dependency to get database session
+    Dependency to get async database session
+    
+    Yields:
+        AsyncSession: SQLAlchemy async database session
+    """
+    async with AsyncSessionLocal() as session:
+        yield session
+
+def get_sync_db() -> Generator[Session, None, None]:
+    """
+    Dependency to get synchronous database session (for migrations, etc.)
     
     Yields:
         Session: SQLAlchemy database session

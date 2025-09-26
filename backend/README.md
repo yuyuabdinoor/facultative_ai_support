@@ -38,37 +38,36 @@ The backend follows a multi-agent architecture using Celery for distributed proc
 - Python 3.12.4
 - Docker and Docker Compose (for services)
 
-### Quick Start
+### Quick Start (Containerized)
 
-1. **Create virtual environment**
+1. **Build containers** (from project root)
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   docker compose build backend celery_worker celery_beat
    ```
 
-2. **Install dependencies**
+2. **Start services**
    ```bash
-   pip install -r requirements.txt
+   docker compose up -d backend celery_worker celery_beat db redis
    ```
 
-3. **Start with Docker (recommended)**
-   ```bash
-   # From project root
-   make dev
-   ```
-
-   This will:
-   - Start PostgreSQL and Redis in containers
-   - Mount your local Python packages into backend containers
-   - Start FastAPI with hot reload
-   - Start Celery worker and beat scheduler
+3. **Access**
+   - API: http://localhost:8005
+   - Docs: http://localhost:8005/docs
+   - ReDoc: http://localhost:8005/redoc
 
 ### Alternative Development Options
 
-#### Full Container Development
+#### Run locally without Docker (advanced)
 ```bash
-# Installs all packages inside containers (slower)
-make dev-full
+# Start db and redis in docker
+docker compose up -d db redis
+
+# Then run backend locally
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Celery workers (separate terminals)
+celery -A app.celery worker --loglevel=info
+celery -A app.celery beat --loglevel=info
 ```
 
 #### Local Services Only
@@ -107,22 +106,48 @@ LOG_LEVEL=DEBUG
 
 # Security (generate secure keys for production)
 SECRET_KEY=your-secret-key-here
+
+# Currency
+# If set, the backend will fetch live FX rates and convert to KES in reports
+EXCHANGE_RATE_API_KEY=your-exchangerateapi-key
+# Optional base used when calling provider (default USD)
+EXCHANGE_RATE_BASE=USD
 ```
 
 ### Docker Configuration
 
-The backend uses multiple Dockerfile configurations:
+The backend provides multiple Dockerfiles:
 
-- **Dockerfile.local**: Lightweight container that mounts local Python packages
-- **Dockerfile.dev**: Full development container with all packages installed
+- **Dockerfile.local**: Local development image (installs dependencies in-container)
 - **Dockerfile**: Production-ready multi-stage build
 
-## API Documentation
+## API Overview (Demo-relevant)
 
-Once running, visit:
-- **Interactive docs**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-- **OpenAPI JSON**: http://localhost:8000/openapi.json
+- **Documents**
+  - List: `GET /api/v1/documents/`
+  - Upload: `POST /api/v1/documents/upload?application_id=...`
+  - Trigger OCR: `POST /api/v1/documents/{document_id}/ocr`
+  - OCR status: `GET /api/v1/documents/{document_id}/ocr/status`
+  - OCR text: `GET /api/v1/documents/{document_id}/ocr/text`
+  - Download: `GET /api/v1/documents/{document_id}/download`
+
+- **Email Processing**
+  - Process now: `POST /api/v1/email/emails/process-now`
+  - Enable polling: `POST /api/v1/email/emails/polling/enable`
+  - Disable polling: `POST /api/v1/email/emails/polling/disable`
+  - Polling status: `GET /api/v1/email/emails/polling/status`
+
+- **Applications / Workflow**
+  - Create application: `POST /api/v1/applications/`
+  - Application status: `GET /api/v1/applications/{application_id}/status`
+  - Start workflow: `POST /api/v1/task-monitoring/workflows/start?application_id=...&document_ids=...`
+
+- **Reports**
+  - Generate analysis report: `POST /api/v1/reports/applications/{application_id}/analysis-report`
+  - Download report: `GET /api/v1/reports/download/{filename}`
+  - Get currency rates (KES per unit): `GET /api/v1/reports/currency-rates`
+  - Manually update currency rates: `POST /api/v1/reports/update-currency-rates` (admin)
+  - Refresh currency rates from ExchangeRate-API: `POST /api/v1/reports/refresh-currency-rates`
 
 ## Database
 
@@ -242,21 +267,22 @@ celery -A app.celery flower
 
 ### Model Management
 
-Models are automatically downloaded on first use and cached locally. For production:
-
-1. Pre-download models during container build
-2. Use model registry for version management
-3. Implement model warm-up procedures
+- Models download on first use and cache to `/app/.cache/huggingface` in containers.
+- For offline or production builds, prefetch during image build and mount a persistent cache volume.
 
 ## Performance Optimization
 
-### Docker Layer Caching
+### Notes on Dependencies (PaddleOCR & Transformers)
 
-The development setup uses Docker layer caching to avoid reinstalling packages:
+- Backend images install `paddlepaddle==2.6.1` and `paddleocr==2.7.0.3` to enable OCR.
+- Transformers pipelines are initialized by preloading models/tokenizers with `cache_dir`, then constructing pipelines without the `cache_dir` parameter (compat with current transformers).
 
-1. **requirements.txt** copied first for better caching
-2. **Local packages mounted** to avoid installation time
-3. **Multi-stage builds** for production optimization
+### Currency Conversion to KES
+
+- Reports convert financial amounts to KES using an internal rates table.
+- If `EXCHANGE_RATE_API_KEY` is set, rates are refreshed from ExchangeRate-API on startup and can be refreshed via:
+  - `POST /api/v1/reports/refresh-currency-rates`
+- Rates are persisted to `/app/static/currency_rates.csv`.
 
 ### Database Optimization
 

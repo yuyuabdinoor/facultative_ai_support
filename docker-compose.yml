@@ -44,8 +44,7 @@ services:
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
-      # Mount the entire venv directory to use pre-installed packages
-      - ./backend/venv:/app/venv:ro
+      - ./backend/.cache:/app/.cache
     depends_on:
       - db
       - redis
@@ -67,14 +66,13 @@ services:
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
-      # Mount the entire venv directory to use pre-installed packages
-      - ./backend/venv:/app/venv:ro
+      - ./backend/.cache:/app/.cache
     depends_on:
       - db
       - redis
     networks:
       - reinsurance_network
-    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python -m celery -A app.celery worker --loglevel=info; else python -m celery -A app.celery worker --loglevel=info; fi"
+    command: python -m celery -A app.celery worker --loglevel=info
 
   # Celery Beat (Task Scheduler)
   celery_beat:
@@ -90,14 +88,13 @@ services:
       - PYTHONPATH=/app
     volumes:
       - ./backend:/app
-      # Mount the entire venv directory to use pre-installed packages
-      - ./backend/venv:/app/venv:ro
+      - ./backend/.cache:/app/.cache
     depends_on:
       - db
       - redis
     networks:
       - reinsurance_network
-    command: sh -c "if [ -f /app/venv/bin/python ]; then /app/venv/bin/python -m celery -A app.celery beat --loglevel=info; else python -m celery -A app.celery beat --loglevel=info; fi"
+    command: python -m celery -A app.celery beat --loglevel=info
 
   # NextJS Frontend
   frontend:
@@ -108,13 +105,11 @@ services:
     ports:
       - "3005:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8005
     volumes:
       - ./frontend:/app
       # Mount local node_modules to avoid reinstallation (similar to backend Python packages)
       - ./frontend/node_modules:/app/node_modules:ro
-    depends_on:
-      - backend
     networks:
       - reinsurance_network
 

@@ -3,6 +3,7 @@ File storage abstraction layer supporting local filesystem and S3-compatible sto
 """
 import os
 import shutil
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import BinaryIO, Optional
@@ -10,6 +11,26 @@ import aiofiles
 import aiofiles.os
 from datetime import datetime
 import uuid
+
+# Apply pathlib compatibility patch for Python 3.12+
+if sys.version_info >= (3, 12):
+    # Monkey patch the Path.mkdir method to handle exist_ok parameter
+    original_mkdir = Path.mkdir
+    
+    def patched_mkdir(self, mode=0o777, parents=False, exist_ok=False):
+        """Patched mkdir method that handles exist_ok parameter"""
+        try:
+            return original_mkdir(self, mode, parents, exist_ok)
+        except TypeError:
+            # Fallback for older pathlib versions
+            if exist_ok and self.exists():
+                return
+            if parents:
+                os.makedirs(str(self), mode, exist_ok=exist_ok)
+            else:
+                os.mkdir(str(self), mode)
+    
+    Path.mkdir = patched_mkdir
 
 
 class StorageBackend(ABC):
@@ -46,13 +67,7 @@ class LocalFileSystemStorage(StorageBackend):
     
     def __init__(self, base_path: str = "./uploads"):
         self.base_path = Path(base_path)
-        # Handle Python 3.12+ pathlib compatibility
-        try:
-            self.base_path.mkdir(parents=True, exist_ok=True)
-        except TypeError:
-            # Fallback for older pathlib versions
-            import os
-            os.makedirs(str(self.base_path), exist_ok=True)
+        self.base_path.mkdir(parents=True, exist_ok=True)
     
     def _get_full_path(self, file_path: str) -> Path:
         """Get full filesystem path"""
@@ -60,30 +75,41 @@ class LocalFileSystemStorage(StorageBackend):
     
     async def store_file(self, file_content: BinaryIO, file_path: str) -> str:
         """Store file to local filesystem"""
-        full_path = self._get_full_path(file_path)
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        async with aiofiles.open(full_path, 'wb') as f:
-            content = file_content.read()
-            await f.write(content)
-        
-        return str(full_path.relative_to(self.base_path))
+        try:
+            full_path = self._get_full_path(file_path)
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Ensure we're working with strings for aiofiles
+            full_path_str = str(full_path)
+            
+            async with aiofiles.open(full_path_str, 'wb') as f:
+                content = file_content.read()
+                await f.write(content)
+            
+            # Return relative path as string
+            relative_path = full_path.relative_to(self.base_path)
+            return str(relative_path)
+        except Exception as e:
+            raise Exception(f"Failed to store file: {str(e)}")
     
     async def retrieve_file(self, file_path: str) -> bytes:
         """Retrieve file from local filesystem"""
         full_path = self._get_full_path(file_path)
-        if not await aiofiles.os.path.exists(full_path):
+        # aiofiles expects a string path
+        full_path_str = str(full_path)
+        if not await aiofiles.os.path.exists(full_path_str):
             raise FileNotFoundError(f"File not found: {file_path}")
         
-        async with aiofiles.open(full_path, 'rb') as f:
+        async with aiofiles.open(full_path_str, 'rb') as f:
             return await f.read()
     
     async def delete_file(self, file_path: str) -> bool:
         """Delete file from local filesystem"""
         full_path = self._get_full_path(file_path)
         try:
-            if await aiofiles.os.path.exists(full_path):
-                await aiofiles.os.remove(full_path)
+            full_path_str = str(full_path)
+            if await aiofiles.os.path.exists(full_path_str):
+                await aiofiles.os.remove(full_path_str)
                 return True
             return False
         except Exception:
@@ -92,15 +118,16 @@ class LocalFileSystemStorage(StorageBackend):
     async def file_exists(self, file_path: str) -> bool:
         """Check if file exists in local filesystem"""
         full_path = self._get_full_path(file_path)
-        return await aiofiles.os.path.exists(full_path)
+        return await aiofiles.os.path.exists(str(full_path))
     
     async def get_file_size(self, file_path: str) -> int:
         """Get file size from local filesystem"""
         full_path = self._get_full_path(file_path)
-        if not await aiofiles.os.path.exists(full_path):
+        full_path_str = str(full_path)
+        if not await aiofiles.os.path.exists(full_path_str):
             raise FileNotFoundError(f"File not found: {file_path}")
         
-        stat = await aiofiles.os.stat(full_path)
+        stat = await aiofiles.os.stat(full_path_str)
         return stat.st_size
 
 
