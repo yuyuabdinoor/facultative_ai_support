@@ -515,6 +515,7 @@ class EmailProcessor:
                     print(f"[CSV] Error processing {file_path}: {e}")
 
             # PDF - OCR Processing with timing
+
             if ext in ['.pdf']:
                 try:
                     pdf_start = time.time()
@@ -529,56 +530,72 @@ class EmailProcessor:
                             img_pil.save(tmp.name)
                             tmp_path = tmp.name
 
-                        # OCR with PaddleOCR predict
+                        # OCR with timing
                         ocr_start = time.time()
                         results = ocr_engine.ocr_with_detection_and_recognition(tmp_path)
                         ocr_time = time.time() - ocr_start
+                        print(f"  [DEBUG] Results type: {type(results)}")
+                        print(f"  [DEBUG] Results length: {len(results) if isinstance(results, list) else 'N/A'}")
+                        if isinstance(results, list) and len(results) > 0:
+                            print(f"  [DEBUG] First result type: {type(results[0])}")
+                            print(
+                                f"  [DEBUG] First result methods: {[m for m in dir(results[0]) if not m.startswith('_')]}")
 
+                        # SAVE FIRST - before any filtering
+                        if save_visuals and out_root is not None and results:
+                            save_start = time.time()
+                            try:
+                                # PaddleOCR returns a list - get first result
+                                if isinstance(results, list) and len(results) > 0:
+                                    result_obj = results[0]
+
+                                    # Save annotated image
+                                    img_path = out_root / f"{base_name}_page{page_num + 1}_annotated.png"
+                                    result_obj.save_to_img(str(img_path))
+
+                                    # Save JSON
+                                    json_path = out_root / f"{base_name}_page{page_num + 1}_ocr.json"
+                                    result_obj.save_to_json(str(json_path))
+
+                                    save_time = time.time() - save_start
+                                    print(
+                                        f"  [PDF] Page {page_num + 1} - OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                            except Exception as e:
+                                print(f"  [PDF] Warning: Could not save page {page_num + 1}: {e}")
+                                traceback.print_exc()
+
+                        # NOW extract text for context
                         text_parts = []
                         for res in results:
                             result_data = getattr(res, "json", None) or {}
-                            # Expect rec_text and rec_scores lists in result_data
                             rec_texts = result_data.get('rec_text', []) or []
                             rec_scores = result_data.get('rec_scores', []) or []
-                            # If rec_scores present, filter by confidence threshold
+
                             if rec_scores and len(rec_scores) == len(rec_texts):
                                 for t, s in zip(rec_texts, rec_scores):
                                     try:
                                         if float(s) >= 0.7 and str(t).strip():
                                             text_parts.append(str(t).strip())
                                     except Exception:
-                                        # if score not parseable, be conservative and skip
                                         continue
                             else:
-                                # Fallback: if no scores, keep high-confidence heuristics by length
                                 for t in rec_texts:
                                     if isinstance(t, str) and len(t.strip()) >= 2:
                                         text_parts.append(t.strip())
 
-                        # join pieces; skip page if nothing left
                         full_text = ' '.join(text_parts).strip()
-                        if not full_text:
-                            # skip adding this page (user requested skip when no text)
-                            continue
 
-                        attachment_texts.append({
-                            'file': attachment['filename'],
-                            'page': page_num + 1,
-                            'text': full_text,
-                            'method': 'ocr',
-                            'time': time.time() - page_start,
-                            'ocr_time': ocr_time
-                        })
-
-
-                        # Save using PaddleOCR's built-in methods
-                        if save_visuals and out_root is not None:
-                            save_start = time.time()
-                            for res in results:
-                                res.save_to_img(str(out_root / f"{base_name}_page{page_num + 1}_annotated.png"))
-                                res.save_to_json(str(out_root / f"{base_name}_page{page_num + 1}_ocr.json"))
-                            save_time = time.time() - save_start
-                            print(f"  [PDF] Page {page_num + 1} - OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                        # Only skip ADDING to attachment_texts if no text
+                        # But we already saved the visual outputs above
+                        if full_text:
+                            attachment_texts.append({
+                                'file': attachment['filename'],
+                                'page': page_num + 1,
+                                'text': full_text,
+                                'method': 'ocr',
+                                'time': time.time() - page_start,
+                                'ocr_time': ocr_time
+                            })
 
                         # Cleanup temp file
                         os.unlink(tmp_path)
@@ -589,8 +606,7 @@ class EmailProcessor:
                     print(f"[OCR] Error processing PDF {file_path}: {e}")
                     traceback.print_exc()
 
-            # IMAGE FILES - OCR Processing
-            # IMAGE FILES - OCR Processing with timing
+            # IMAGE FILES - FIXED
             elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
                 try:
                     img_start = time.time()
@@ -600,12 +616,41 @@ class EmailProcessor:
                     results = ocr_engine.ocr_with_detection_and_recognition(file_path)
                     ocr_time = time.time() - ocr_start
 
-                    # Extract text from result objects
+                    print(f"  [DEBUG] Results type: {type(results)}")
+                    print(f"  [DEBUG] Results length: {len(results) if isinstance(results, list) else 'N/A'}")
+                    if isinstance(results, list) and len(results) > 0:
+                        print(f"  [DEBUG] First result type: {type(results[0])}")
+                        print(
+                            f"  [DEBUG] First result methods: {[m for m in dir(results[0]) if not m.startswith('_')]}")
+
+                    # SAVE FIRST - before filtering
+                    if save_visuals and out_root is not None and results:
+                        save_start = time.time()
+                        try:
+                            if isinstance(results, list) and len(results) > 0:
+                                result_obj = results[0]
+
+                                # Save annotated image
+                                img_path = out_root / f"{base_name}_annotated.png"
+                                result_obj.save_to_img(str(img_path))
+
+                                # Save JSON
+                                json_path = out_root / f"{base_name}_ocr.json"
+                                result_obj.save_to_json(str(json_path))
+
+                                save_time = time.time() - save_start
+                                print(f"  [IMG] OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                        except Exception as e:
+                            print(f"  [IMG] Warning: Could not save: {e}")
+                            traceback.print_exc()
+
+                    # NOW extract text
                     text_parts = []
                     for res in results:
                         result_data = getattr(res, "json", None) or {}
                         rec_texts = result_data.get('rec_text', []) or []
                         rec_scores = result_data.get('rec_scores', []) or []
+
                         if rec_scores and len(rec_scores) == len(rec_texts):
                             for t, s in zip(rec_texts, rec_scores):
                                 try:
@@ -619,26 +664,85 @@ class EmailProcessor:
                                     text_parts.append(t.strip())
 
                     full_text = ' '.join(text_parts).strip()
-                    if not full_text:
-                        # Skip adding this image attachment if no filtered text
-                        continue
 
-                    attachment_texts.append({
-                        'file': attachment['filename'],
-                        'text': full_text,
-                        'method': 'ocr',
-                        'time': time.time() - img_start,
-                        'ocr_time': ocr_time
-                    })
+                    if full_text:
+                        attachment_texts.append({
+                            'file': attachment['filename'],
+                            'text': full_text,
+                            'method': 'ocr',
+                            'time': time.time() - img_start,
+                            'ocr_time': ocr_time
+                        })
 
-                    # Save using PaddleOCR's built-in methods
-                    if save_visuals and out_root is not None:
+                except Exception as e:
+                    print(f"[OCR] Error processing image {file_path}: {e}")
+                    traceback.print_exc()
+
+            # IMAGE FILES - OCR Processing with timing
+            elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
+                try:
+                    img_start = time.time()
+
+                    # OCR with timing
+                    ocr_start = time.time()
+                    results = ocr_engine.ocr_with_detection_and_recognition(file_path)
+                    ocr_time = time.time() - ocr_start
+
+                    # SAVE FIRST - before any text filtering
+                    if save_visuals and out_root is not None and results:
                         save_start = time.time()
-                        for res in results:
-                            res.save_to_img(str(out_root / f"{base_name}_annotated.png"))
-                            res.save_to_json(str(out_root / f"{base_name}_ocr.json"))
-                        save_time = time.time() - save_start
-                        print(f"  [IMG] OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                        try:
+                            # Handle results structure - could be list or single object
+                            if isinstance(results, list) and len(results) > 0:
+                                result_obj = results[0]
+                            else:
+                                result_obj = results
+
+                            # Save annotated image
+                            img_path = out_root / f"{base_name}_annotated.png"
+                            result_obj.save_to_img(str(img_path))
+
+                            # Save JSON
+                            json_path = out_root / f"{base_name}_ocr.json"
+                            result_obj.save_to_json(str(json_path))
+
+                            save_time = time.time() - save_start
+                            print(f"  [IMG] OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                        except Exception as e:
+                            print(f"  [IMG] Warning: Could not save visuals: {e}")
+                            traceback.print_exc()
+
+                    # NOW extract text from result objects
+                    text_parts = []
+                    for res in results:
+                        result_data = getattr(res, "json", None) or {}
+                        rec_texts = result_data.get('rec_text', []) or []
+                        rec_scores = result_data.get('rec_scores', []) or []
+
+                        if rec_scores and len(rec_scores) == len(rec_texts):
+                            for t, s in zip(rec_texts, rec_scores):
+                                try:
+                                    if float(s) >= 0.7 and str(t).strip():
+                                        text_parts.append(str(t).strip())
+                                except Exception:
+                                    continue
+                        else:
+                            for t in rec_texts:
+                                if isinstance(t, str) and len(t.strip()) >= 2:
+                                    text_parts.append(t.strip())
+
+                    full_text = ' '.join(text_parts).strip()
+
+                    # Only add to attachment_texts if there's filtered text
+                    # But we already saved visuals above regardless
+                    if full_text:
+                        attachment_texts.append({
+                            'file': attachment['filename'],
+                            'text': full_text,
+                            'method': 'ocr',
+                            'time': time.time() - img_start,
+                            'ocr_time': ocr_time
+                        })
 
                 except Exception as e:
                     print(f"[OCR] Error processing image {file_path}: {e}")
@@ -1095,7 +1199,7 @@ class Detect_and_Recognize:
             text_det_thresh=0.3,
             text_det_box_thresh=0.6,
             text_det_unclip_ratio=1.5,
-            text_recognition_batch_size=2,
+            text_recognition_batch_size=8,
             ocr_version="PP-OCRv5",
         )
 
