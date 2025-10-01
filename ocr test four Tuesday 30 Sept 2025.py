@@ -16,6 +16,8 @@ from openpyxl.utils import get_column_letter
 import tempfile
 import os
 from PIL import Image
+import re
+
 
 class OfficeDocumentProcessor:
     """Process Office documents (docx, pptx, xlsx, csv) with table extraction"""
@@ -532,15 +534,32 @@ class EmailProcessor:
                         results = ocr_engine.ocr_with_detection_and_recognition(tmp_path)
                         ocr_time = time.time() - ocr_start
 
-                        # Extract text from result objects using .json attribute
                         text_parts = []
                         for res in results:
-                            result_data = res.json  # Access JSON data
-                            # Extract text from the structured result
-                            if 'dt_polys' in result_data and 'rec_text' in result_data:
-                                text_parts.extend(result_data['rec_text'])
+                            result_data = getattr(res, "json", None) or {}
+                            # Expect rec_text and rec_scores lists in result_data
+                            rec_texts = result_data.get('rec_text', []) or []
+                            rec_scores = result_data.get('rec_scores', []) or []
+                            # If rec_scores present, filter by confidence threshold
+                            if rec_scores and len(rec_scores) == len(rec_texts):
+                                for t, s in zip(rec_texts, rec_scores):
+                                    try:
+                                        if float(s) >= 0.7 and str(t).strip():
+                                            text_parts.append(str(t).strip())
+                                    except Exception:
+                                        # if score not parseable, be conservative and skip
+                                        continue
+                            else:
+                                # Fallback: if no scores, keep high-confidence heuristics by length
+                                for t in rec_texts:
+                                    if isinstance(t, str) and len(t.strip()) >= 2:
+                                        text_parts.append(t.strip())
 
-                        full_text = ' '.join(text_parts)
+                        # join pieces; skip page if nothing left
+                        full_text = ' '.join(text_parts).strip()
+                        if not full_text:
+                            # skip adding this page (user requested skip when no text)
+                            continue
 
                         attachment_texts.append({
                             'file': attachment['filename'],
@@ -550,6 +569,7 @@ class EmailProcessor:
                             'time': time.time() - page_start,
                             'ocr_time': ocr_time
                         })
+
 
                         # Save using PaddleOCR's built-in methods
                         if save_visuals and out_root is not None:
@@ -583,11 +603,25 @@ class EmailProcessor:
                     # Extract text from result objects
                     text_parts = []
                     for res in results:
-                        result_data = res.json
-                        if 'dt_polys' in result_data and 'rec_text' in result_data:
-                            text_parts.extend(result_data['rec_text'])
+                        result_data = getattr(res, "json", None) or {}
+                        rec_texts = result_data.get('rec_text', []) or []
+                        rec_scores = result_data.get('rec_scores', []) or []
+                        if rec_scores and len(rec_scores) == len(rec_texts):
+                            for t, s in zip(rec_texts, rec_scores):
+                                try:
+                                    if float(s) >= 0.7 and str(t).strip():
+                                        text_parts.append(str(t).strip())
+                                except Exception:
+                                    continue
+                        else:
+                            for t in rec_texts:
+                                if isinstance(t, str) and len(t.strip()) >= 2:
+                                    text_parts.append(t.strip())
 
-                    full_text = ' '.join(text_parts)
+                    full_text = ' '.join(text_parts).strip()
+                    if not full_text:
+                        # Skip adding this image attachment if no filtered text
+                        continue
 
                     attachment_texts.append({
                         'file': attachment['filename'],
@@ -661,40 +695,261 @@ class EmailProcessor:
 
         return attachment_texts
 
+def extract_candidates_from_text(text):
+    """Return a small dict of candidate values useful as LLM hints."""
+    cand = {}
+
+    if not text:
+        return cand
+
+    # INSURED - look for common prefixes
+    m = re.search(r'(?:Name of the Original Insured|Insured|Assured|Named Insured)[:\s\-]*([A-Z0-9&\-\.,\(\) ]{3,120})', text, re.I)
+    if m:
+        cand['insured'] = m.group(1).strip()
+
+    # CEDANT
+    m = re.search(r'(?:Cedant|Cedant Name|Ceding Company|Insurer)[:\s\-]*([A-Z0-9&\-\.,\(\) ]{3,120})', text, re.I)
+    if m:
+        cand['cedant'] = m.group(1).strip()
+
+    # TSI / Total Sum Insured
+    m = re.search(r'(?:Total Sum Insured|Total \(QAR\)|SUM INSURED|TSI)[^\n\r]{0,120}([\$\€\£A-Z]{0,4}\s*[\d,\.]+(?:\s*\(approx\))?)', text, re.I)
+    if m:
+        raw = m.group(1).strip()
+        cand['total_sum_insured'] = raw
+        # numeric parse
+        num = re.sub(r'[^\d\.\-]', '', raw)
+        try:
+            cand['total_sum_insured_float'] = float(num) if num else "TBD"
+        except Exception:
+            cand['total_sum_insured_float'] = "TBD"
+
+    # Currency attempt from near TSI or standalone currency code
+    m = re.search(r'\b(USD|EUR|GBP|KES|QAR|AED|USD\$|US\$)\b', text, re.I)
+    if m:
+        cand['currency'] = m.group(1).upper().replace('US$', 'USD').replace('USD$', 'USD')
+
+    # PERIOD
+    m = re.search(r'(?:Period of Insurance|Period)[:\s\-]*(From\s+[^\n\r]+?\s+to\s+[^\n\r]+|[\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4}\s*to\s*[\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})', text, re.I)
+    if m:
+        cand['period_of_insurance'] = m.group(1).strip()
+
+    # Country
+    m = re.search(r'(?:Risk Location|Country|Territorial Limit|State of)[:\s\-]*([A-Za-z \-]{2,60})', text, re.I)
+    if m:
+        cand['country'] = m.group(1).strip()
+
+    # Retention percentage
+    m = re.search(r'(?:Cedant’s retention|Cedant retention|Retention of Cedant|Cedant’s retention in %|Cedant retention in %)[^\d]{0,10}([\d]{1,3}\s*%?)', text, re.I)
+    if m:
+        cand['retention_of_cedant'] = m.group(1).strip()
+
+    # Share offered
+    m = re.search(r'(?:Share Offered|Offered Share|Share)[:\s\-]*([\d]{1,3}\s*%?)', text, re.I)
+    if m:
+        cand['share_offered'] = m.group(1).strip()
+
+    return cand
+
+MASTER_PROMPT = """INSTRUCTIONS FOR STRUCTURED EXTRACTION (READ CAREFULLY)
+
+You are given the text of a single email and any OCR-extracted text from its attachments (only regions with confidence ≥ 0.7). Use this context to extract reinsurance information and output it as a JSON object.
+
+Fields to extract
+
+insured: Name of the insured party (string).
+
+cedant: Name of the ceding insurer or company (string).
+
+broker: Name of the broker or intermediary (string).
+
+occupation_of_insured: Occupation or role of the insured (string).
+
+main_activities: Main business activities (string).
+
+perils_covered: Covered perils or risks (string).
+
+geographical_limit: Geographical territory or limits (string).
+
+situation_of_risk: Location or situation of the risk (string).
+
+total_sum_insured: Total insured sum (numeric part only, as string).
+
+total_sum_insured_float: Total insured sum as a number (float).
+
+currency: Currency of the insured sum (string).
+
+period_of_insurance: Insurance coverage period (dates or description, string).
+
+excess_deductible: Excess or deductible (string; use "TBD" if unknown).
+
+retention_of_cedant: Cedant's retention (string; use "TBD" if unknown).
+
+possible_maximum_loss: Possible maximum loss (string; use "TBD" if unknown).
+
+cat_exposure: Catastrophe exposure (string; use "TBD" if unknown).
+
+claims_experience: Claims experience details (string; use "TBD" if unknown).
+
+reinsurance_deductions: Reinsurance deductions (string; use "TBD" if unknown).
+
+share_offered: Share offered (string; use "TBD" if unknown).
+
+inward_acceptances: Inward acceptances (string; use "TBD" if unknown).
+
+risk_surveyor_report: Risk surveyor’s report (string; use "TBD" if unknown).
+
+premium_rates: Premium rates (string; use "TBD" if unknown).
+
+premium: Premium amount (string; use "TBD" if unknown).
+
+climate_change_risk_factors: Climate change risk factors (string; use "TBD" if unknown).
+
+esg_risk_assessment: ESG risk assessment (string; use "TBD" if unknown).
+
+country: Country of the risk or insured (string).
+
+Extraction Instructions
+
+Output Format: Provide exactly one valid JSON object with all the fields above. Do not include any additional keys or text. Do not output markdown or code fences—only raw JSON.
+
+Missing Values: If a field’s value is not present or is unclear in the text, set it to "TBD" (the string).
+
+Value Types: All values should be strings except for total_sum_insured_float, which must be a numeric value (no quotes). For total_sum_insured, strip any formatting so it’s a plain number as a string. Use a standard currency code or symbol for currency.
+
+Semantic Mapping: The text may use different terms or synonyms. Use context to map them to the correct fields. For example:
+
+Words like “Insured”, “Assured”, or the policyholder’s name → insured.
+
+“Cedant”, “Ceding insurer”, or similar → cedant.
+
+“Broker” or “Intermediary” → broker.
+
+Descriptions of the insured’s job or role → occupation_of_insured.
+
+Descriptions of business or operations → main_activities.
+
+Phrases like “covered perils”, “risks” → perils_covered.
+
+Territory or country names → geographical_limit or country as appropriate.
+
+Locations or site descriptions → situation_of_risk.
+
+Amounts with currency (e.g. “USD 100000”) → total_sum_insured (e.g. "100000"), currency (e.g. "USD"), total_sum_insured_float (e.g. 100000.0).
+
+Date ranges or terms like “from”/“to” → period_of_insurance.
+
+Words like “Excess”, “Deductible” → excess_deductible.
+
+“Retention” → retention_of_cedant.
+
+“Maximum loss”, “PML” → possible_maximum_loss.
+
+“Cat exposure” or “Catastrophe” → cat_exposure.
+
+“Claims experience” → claims_experience.
+
+“Reinsurance deductions” → reinsurance_deductions.
+
+“Share offered” → share_offered.
+
+“Inward acceptances” → inward_acceptances.
+
+“Surveyor report” → risk_surveyor_report.
+
+“Premium rate” → premium_rates.
+
+“Premium” (amount) → premium.
+
+“Climate risk factors” → climate_change_risk_factors.
+
+“ESG” or “sustainability” terms → esg_risk_assessment.
+
+No Extra Text: The model should only output the JSON object. It must not output any explanatory text or additional formatting. Ensure the JSON is syntactically correct and exactly matches the fields above.
+
+---TEXT BLOCK STARTS BELOW---
+{LLM_INPUT}
+---TEXT BLOCK ENDS ABOVE---
+"""
+
+def _truncate_keep_ends(text, max_len=11000):
+    """If text > max_len, keep start and end with a truncation marker in the middle."""
+    if not text or len(text) <= max_len:
+        return text
+    head = text[: int(max_len * 0.7)]
+    tail = text[-int(max_len * 0.3):]
+    return head + "\n\n...[TRUNCATED]...\n\n" + tail
+
 def create_llm_context(email_data, attachment_texts):
-    """Combine email and attachment data for LLM"""
+    """
+    Build LLM context and fill the MASTER_PROMPT with the combined text.
+    - Skips attachments with empty text.
+    - Returns (context_dict, llm_prompt_string).
+    """
+
+    # keep only attachments that have non-empty text (already filtered by OCR threshold earlier)
+    kept_attachments = []
+    for att in attachment_texts:
+        txt = att.get('text', '')
+        if isinstance(txt, str) and txt.strip():
+            kept_attachments.append(att)
+
+    # Build context (same shape as before but with kept attachments)
     context = {
         'email': {
-            'subject': email_data['metadata']['subject'],
-            'from': email_data['metadata']['sender'],
-            'date': email_data['metadata']['date'],
-            'body': email_data['body']['plain_text']
+            'subject': email_data['metadata'].get('subject', ''),
+            'from': email_data['metadata'].get('sender', ''),
+            'date': email_data['metadata'].get('date', ''),
+            'body': email_data['body'].get('plain_text', '') if 'body' in email_data else ''
         },
-        'attachments': attachment_texts,
-        'total_attachments': len(attachment_texts),
+        'attachments': kept_attachments,
+        'total_attachments': len(kept_attachments),
         'processing_times': {
-            'email': 0,  # Add timing
-            'attachments': sum(a['time'] for a in attachment_texts)
+            'email': 0,
+            'attachments': sum(a.get('time', 0) for a in kept_attachments)
         }
     }
 
-    # Create a single text representation for LLM
-    llm_text = f"""
-        Email Subject: {context['email']['subject']}
-        From: {context['email']['from']}
-        Date: {context['email']['date']}
+    # Build combined human-readable text
+    parts = []
+    parts.append(f"Email Subject: {context['email']['subject']}")
+    parts.append(f"From: {context['email']['from']}")
+    parts.append(f"Date: {context['email']['date']}")
+    parts.append("\nEmail Body:\n" + (context['email']['body'].strip() or ""))
 
-        Email Body:
-        {context['email']['body']}
+    if kept_attachments:
+        parts.append("\nAttachments included for extraction:\n")
+        for i, att in enumerate(kept_attachments, start=1):
+            header = f"--- Attachment {i}: {att['file']} ---"
+            page_info = f" (page {att.get('page')})" if att.get('page') else ""
+            body_text = att.get('text', '').strip()
+            # if extremely long, keep the head and tail
+            if len(body_text) > 6000:
+                body_text = body_text[:4000] + "\n\n...[ATTACHMENT TRUNCATED]...\n\n" + body_text[-1800:]
+            parts.append(header + page_info + "\n" + body_text)
 
-        Attachments ({context['total_attachments']}):
-    """
+    combined_text = "\n\n".join(parts).strip()
 
-    for att in attachment_texts:
-        llm_text += f"\n\n--- {att['file']} ---\n{att['text'][:500]}..."  # Truncate for preview
+    # Add candidate hints from combined_text and email body to help mapping
+    try:
+        candidates = extract_candidates_from_text(combined_text + "\n" + context['email']['body'])
+    except Exception:
+        candidates = {}
 
-    return context, llm_text
+    if candidates:
+        hint_lines = ["\nCandidate Hints (auto-extracted):"]
+        for k, v in candidates.items():
+            hint_lines.append(f"{k}: {v}")
+        combined_text += "\n\n" + "\n".join(hint_lines)
 
+    # Truncate overall combined_text to avoid overlong input
+    combined_text = _truncate_keep_ends(combined_text, max_len=11000)
+
+    # Fill the MASTER_PROMPT with the combined text
+    llm_prompt = MASTER_PROMPT.replace("{LLM_INPUT}", combined_text)
+
+    # Return both the structured context and the full prompt to send to the LLM
+    return context, llm_prompt
 
 def process_all_subfolders(root_folder, save_json=True):
     """Process all subfolders in root folder with progress indicators"""
@@ -840,7 +1095,7 @@ class Detect_and_Recognize:
             text_det_thresh=0.3,
             text_det_box_thresh=0.6,
             text_det_unclip_ratio=1.5,
-            text_recognition_batch_size=4,
+            text_recognition_batch_size=2,
             ocr_version="PP-OCRv5",
         )
 
@@ -899,7 +1154,7 @@ class Detect_and_Recognize:
 
 
 if __name__ == "__main__":
-    root_folder = "test datasets"
+    root_folder = "test dataset one"
 
     # Initialize OCR engine
     print("Initializing OCR engine...")
