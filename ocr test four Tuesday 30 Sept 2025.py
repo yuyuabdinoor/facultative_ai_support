@@ -514,8 +514,8 @@ class EmailProcessor:
                 except Exception as e:
                     print(f"[CSV] Error processing {file_path}: {e}")
 
-            # PDF - OCR Processing with timing
 
+            # PDF - OCR Processing - FIXED
             if ext in ['.pdf']:
                 try:
                     pdf_start = time.time()
@@ -534,12 +534,6 @@ class EmailProcessor:
                         ocr_start = time.time()
                         results = ocr_engine.ocr_with_detection_and_recognition(tmp_path)
                         ocr_time = time.time() - ocr_start
-                        print(f"  [DEBUG] Results type: {type(results)}")
-                        print(f"  [DEBUG] Results length: {len(results) if isinstance(results, list) else 'N/A'}")
-                        if isinstance(results, list) and len(results) > 0:
-                            print(f"  [DEBUG] First result type: {type(results[0])}")
-                            print(
-                                f"  [DEBUG] First result methods: {[m for m in dir(results[0]) if not m.startswith('_')]}")
 
                         # SAVE FIRST - before any filtering
                         if save_visuals and out_root is not None and results:
@@ -549,26 +543,35 @@ class EmailProcessor:
                                 if isinstance(results, list) and len(results) > 0:
                                     result_obj = results[0]
 
-                                    # Save annotated image
-                                    img_path = out_root / f"{base_name}_page{page_num + 1}_annotated.png"
-                                    result_obj.save_to_img(str(img_path))
+                                    # Create page-specific subdirectory for this page's outputs
+                                    page_dir = out_root / f"{base_name}_page{page_num + 1}"
+                                    page_dir.mkdir(exist_ok=True)
 
-                                    # Save JSON
-                                    json_path = out_root / f"{base_name}_page{page_num + 1}_ocr.json"
+                                    # save_to_img expects a DIRECTORY, not a filename
+                                    result_obj.save_to_img(str(page_dir))
+
+                                    # Save JSON with specific filename
+                                    json_path = page_dir / "ocr_result.json"
                                     result_obj.save_to_json(str(json_path))
 
                                     save_time = time.time() - save_start
-                                    print(
-                                        f"  [PDF] Page {page_num + 1} - OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                                    print(f"  [PDF] Page {page_num + 1} - OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                                    print(f"        Saved to: {page_dir}")
                             except Exception as e:
                                 print(f"  [PDF] Warning: Could not save page {page_num + 1}: {e}")
                                 traceback.print_exc()
 
-                        # NOW extract text for context
+                        # NOW extract text for context - FIXED KEY NAMES
                         text_parts = []
                         for res in results:
-                            result_data = getattr(res, "json", None) or {}
-                            rec_texts = result_data.get('rec_text', []) or []
+                            # Access the JSON dict directly from the result object
+                            if isinstance(res, dict):
+                                result_data = res
+                            else:
+                                result_data = getattr(res, "json", None) or res
+
+                            # CORRECT KEY: 'rec_texts' not 'rec_text'
+                            rec_texts = result_data.get('rec_texts', []) or []
                             rec_scores = result_data.get('rec_scores', []) or []
 
                             if rec_scores and len(rec_scores) == len(rec_texts):
@@ -606,79 +609,7 @@ class EmailProcessor:
                     print(f"[OCR] Error processing PDF {file_path}: {e}")
                     traceback.print_exc()
 
-            # IMAGE FILES - FIXED
-            elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
-                try:
-                    img_start = time.time()
-
-                    # OCR with timing
-                    ocr_start = time.time()
-                    results = ocr_engine.ocr_with_detection_and_recognition(file_path)
-                    ocr_time = time.time() - ocr_start
-
-                    print(f"  [DEBUG] Results type: {type(results)}")
-                    print(f"  [DEBUG] Results length: {len(results) if isinstance(results, list) else 'N/A'}")
-                    if isinstance(results, list) and len(results) > 0:
-                        print(f"  [DEBUG] First result type: {type(results[0])}")
-                        print(
-                            f"  [DEBUG] First result methods: {[m for m in dir(results[0]) if not m.startswith('_')]}")
-
-                    # SAVE FIRST - before filtering
-                    if save_visuals and out_root is not None and results:
-                        save_start = time.time()
-                        try:
-                            if isinstance(results, list) and len(results) > 0:
-                                result_obj = results[0]
-
-                                # Save annotated image
-                                img_path = out_root / f"{base_name}_annotated.png"
-                                result_obj.save_to_img(str(img_path))
-
-                                # Save JSON
-                                json_path = out_root / f"{base_name}_ocr.json"
-                                result_obj.save_to_json(str(json_path))
-
-                                save_time = time.time() - save_start
-                                print(f"  [IMG] OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
-                        except Exception as e:
-                            print(f"  [IMG] Warning: Could not save: {e}")
-                            traceback.print_exc()
-
-                    # NOW extract text
-                    text_parts = []
-                    for res in results:
-                        result_data = getattr(res, "json", None) or {}
-                        rec_texts = result_data.get('rec_text', []) or []
-                        rec_scores = result_data.get('rec_scores', []) or []
-
-                        if rec_scores and len(rec_scores) == len(rec_texts):
-                            for t, s in zip(rec_texts, rec_scores):
-                                try:
-                                    if float(s) >= 0.7 and str(t).strip():
-                                        text_parts.append(str(t).strip())
-                                except Exception:
-                                    continue
-                        else:
-                            for t in rec_texts:
-                                if isinstance(t, str) and len(t.strip()) >= 2:
-                                    text_parts.append(t.strip())
-
-                    full_text = ' '.join(text_parts).strip()
-
-                    if full_text:
-                        attachment_texts.append({
-                            'file': attachment['filename'],
-                            'text': full_text,
-                            'method': 'ocr',
-                            'time': time.time() - img_start,
-                            'ocr_time': ocr_time
-                        })
-
-                except Exception as e:
-                    print(f"[OCR] Error processing image {file_path}: {e}")
-                    traceback.print_exc()
-
-            # IMAGE FILES - OCR Processing with timing
+            # IMAGE FILES - FIXED (matches your current code structure)
             elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
                 try:
                     img_start = time.time()
@@ -692,31 +623,41 @@ class EmailProcessor:
                     if save_visuals and out_root is not None and results:
                         save_start = time.time()
                         try:
-                            # Handle results structure - could be list or single object
+                            # Handle results structure - should be a list
                             if isinstance(results, list) and len(results) > 0:
                                 result_obj = results[0]
                             else:
                                 result_obj = results
 
-                            # Save annotated image
-                            img_path = out_root / f"{base_name}_annotated.png"
-                            result_obj.save_to_img(str(img_path))
+                            # Create page-specific subdirectory for this page's outputs
+                            page_dir = out_root / f"{base_name}_page{page_num + 1}"
+                            page_dir.mkdir(exist_ok=True)
 
-                            # Save JSON
-                            json_path = out_root / f"{base_name}_ocr.json"
+                            # save_to_img expects a DIRECTORY, not a filename
+                            result_obj.save_to_img(str(page_dir))
+
+                            # Save JSON with specific filename
+                            json_path = page_dir / "ocr_result.json"
                             result_obj.save_to_json(str(json_path))
 
                             save_time = time.time() - save_start
-                            print(f"  [IMG] OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                            print(f"  [PDF] Page {page_num + 1} - OCR: {ocr_time:.2f}s, Save: {save_time:.2f}s")
+                            print(f"        Saved to: {page_dir}")
                         except Exception as e:
                             print(f"  [IMG] Warning: Could not save visuals: {e}")
                             traceback.print_exc()
 
-                    # NOW extract text from result objects
+                    # NOW extract text from result objects - FIXED KEY NAMES
                     text_parts = []
                     for res in results:
-                        result_data = getattr(res, "json", None) or {}
-                        rec_texts = result_data.get('rec_text', []) or []
+                        # Access the JSON dict directly from the result object
+                        if isinstance(res, dict):
+                            result_data = res
+                        else:
+                            result_data = getattr(res, "json", None) or res
+
+
+                        rec_texts = result_data.get('rec_texts', []) or []
                         rec_scores = result_data.get('rec_scores', []) or []
 
                         if rec_scores and len(rec_scores) == len(rec_texts):
