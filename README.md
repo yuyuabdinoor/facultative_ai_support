@@ -19,7 +19,7 @@ An intelligent system that automates the analysis and decision-making process fo
 - **Redis**: Caching and message broker
 - **Celery**: Distributed task processing
 - **Hugging Face Transformers**: Open-source AI models
-- **DOCTR**: OCR processing
+- **PaddleOCR**: OCR processing
 
 ### Frontend
 - **NextJS 14**: React framework with TypeScript
