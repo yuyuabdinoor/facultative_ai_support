@@ -1,5 +1,7 @@
 import time
 import datetime
+from typing import Dict, Any
+import ollama
 import extract_msg
 import json
 import numpy as np
@@ -12,26 +14,28 @@ import pandas as pd
 from docx import Document
 from pptx import Presentation
 import openpyxl
-from openpyxl.utils import get_column_letter
 import tempfile
 import os
 from PIL import Image
 import re
+from config import OLLAMA_CONFIG, OCR_CONFIG, PROCESSING_CONFIG
 
+#test ='mychen76/qwen3_cline_roocode:4b'
+#embedding = 'qwen3-embedding:0.6b'
 
 class OfficeDocumentProcessor:
     """Process Office documents (docx, pptx, xlsx, csv) with table extraction"""
-
     @staticmethod
     def extract_docx(file_path):
-        """Extract text and tables from Word documents"""
+        """Extract text and tables from Word documents with table detection"""
         doc = Document(file_path)
         content = {
             'paragraphs': [],
             'tables': [],
             'metadata': {
                 'total_paragraphs': 0,
-                'total_tables': 0
+                'total_tables': 0,
+                'table_validation': []
             }
         }
 
@@ -40,36 +44,76 @@ class OfficeDocumentProcessor:
             if para.text.strip():
                 content['paragraphs'].append(para.text)
 
-        # Extract tables with proper column/row alignment
+        # Enhanced table extraction
         for table_idx, table in enumerate(doc.tables):
             table_data = {
                 'table_number': table_idx + 1,
                 'rows': len(table.rows),
                 'columns': len(table.columns),
                 'data': [],
-                'dataframe': None
+                'dataframe': None,
+                'validation': {
+                    'has_header': False,
+                    'empty_cells': 0,
+                    'merged_cells': 0,
+                    'data_quality_score': 0.0
+                }
             }
 
-            # Extract table data
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
+            # Extract table data with validation
+            total_cells = 0
+            empty_cells = 0
+            for row_idx, row in enumerate(table.rows):
+                row_data = []
+                for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    total_cells += 1
+                    if not cell_text:
+                        empty_cells += 1
+                    row_data.append(cell_text)
                 table_data['data'].append(row_data)
 
-            # Convert to DataFrame if possible
+            # Calculate data quality metrics
+            table_data['validation']['empty_cells'] = empty_cells
+            table_data['validation']['data_quality_score'] = (
+                                                                         total_cells - empty_cells) / total_cells if total_cells > 0 else 0
+
             try:
                 if len(table_data['data']) > 1:
-                    # Assume first row is header
-                    df = pd.DataFrame(table_data['data'][1:], columns=table_data['data'][0])
-                    table_data['dataframe'] = df.to_dict('records')
-                    table_data['dataframe_shape'] = df.shape
+                    # Check if first row looks like headers (contains mostly non-numeric text)
+                    first_row = table_data['data'][0]
+                    header_score = sum(
+                        1 for cell in first_row if cell and not cell.replace('.', '').replace(',', '').isdigit()) / len(
+                        first_row)
+
+                    if header_score > 0.6:  # More than 60% non-numeric
+                        table_data['validation']['has_header'] = True
+                        df = pd.DataFrame(table_data['data'][1:], columns=first_row)
+                    else:
+                        df = pd.DataFrame(table_data['data'])
                 else:
                     df = pd.DataFrame(table_data['data'])
+
+                # Clean DataFrame
+                df = df.dropna(how='all').dropna(axis=1, how='all')
+
+                if not df.empty:
                     table_data['dataframe'] = df.to_dict('records')
                     table_data['dataframe_shape'] = df.shape
+                    table_data['columns'] = df.columns.tolist()
+                else:
+                    table_data['dataframe'] = []
+                    table_data['dataframe_shape'] = (0, 0)
+                    table_data['columns'] = []
+
             except Exception as e:
                 print(f"Could not convert table {table_idx + 1} to DataFrame: {e}")
+                table_data['dataframe'] = []
+                table_data['dataframe_shape'] = (0, 0)
+                table_data['columns'] = []
 
             content['tables'].append(table_data)
+            content['metadata']['table_validation'].append(table_data['validation'])
 
         content['metadata']['total_paragraphs'] = len(content['paragraphs'])
         content['metadata']['total_tables'] = len(content['tables'])
@@ -144,13 +188,14 @@ class OfficeDocumentProcessor:
 
     @staticmethod
     def extract_xlsx(file_path):
-        """Extract data from Excel files with sheet and table info"""
+        """Excel extraction with sheet analysis"""
         wb = openpyxl.load_workbook(file_path, data_only=True)
         content = {
             'sheets': [],
             'metadata': {
                 'total_sheets': len(wb.sheetnames),
-                'sheet_names': wb.sheetnames
+                'sheet_names': wb.sheetnames,
+                'sheet_analysis': []
             }
         }
 
@@ -160,70 +205,114 @@ class OfficeDocumentProcessor:
                 'sheet_name': sheet_name,
                 'used_range': f"{ws.dimensions}",
                 'data': [],
-                'dataframe': None
+                'dataframe': None,
+                'analysis': {
+                    'has_data': False,
+                    'data_density': 0.0,
+                    'likely_headers': False
+                }
             }
 
             # Extract all rows
+            all_rows = []
             for row in ws.iter_rows(values_only=True):
-                sheet_data['data'].append(list(row))
+                all_rows.append(list(row))
 
-            # Convert to DataFrame
-            try:
-                if len(sheet_data['data']) > 1:
-                    # Try to use first row as headers
-                    df = pd.DataFrame(sheet_data['data'][1:], columns=sheet_data['data'][0])
-                else:
-                    df = pd.DataFrame(sheet_data['data'])
+            sheet_data['data'] = all_rows
 
-                # Remove completely empty rows/columns
-                df = df.dropna(how='all').dropna(axis=1, how='all')
+            # Analyze sheet content
+            if all_rows:
+                # Check if sheet has meaningful data
+                non_empty_cells = sum(1 for row in all_rows for cell in row if cell is not None and str(cell).strip())
+                total_cells = sum(len(row) for row in all_rows)
+                sheet_data['analysis']['data_density'] = non_empty_cells / total_cells if total_cells > 0 else 0
+                sheet_data['analysis']['has_data'] = sheet_data['analysis']['data_density'] > 0.1
 
-                sheet_data['dataframe'] = df.to_dict('records')
-                sheet_data['dataframe_shape'] = df.shape
-                sheet_data['columns'] = df.columns.tolist()
-            except Exception as e:
-                print(f"Could not convert sheet '{sheet_name}' to DataFrame: {e}")
+                try:
+                    if len(all_rows) > 1:
+                        # Better header detection
+                        first_row = all_rows[0]
+                        header_indicators = sum(1 for cell in first_row
+                                                if cell and isinstance(cell, str) and
+                                                not str(cell).replace('.', '').replace(',', '').replace('-',
+                                                                                                        '').isdigit())
+
+                        if header_indicators > len(first_row) * 0.5:
+                            sheet_data['analysis']['likely_headers'] = True
+                            df = pd.DataFrame(all_rows[1:], columns=first_row)
+                        else:
+                            df = pd.DataFrame(all_rows)
+                    else:
+                        df = pd.DataFrame(all_rows)
+
+                    # Clean DataFrame
+                    df = df.dropna(how='all').dropna(axis=1, how='all')
+
+                    if not df.empty:
+                        sheet_data['dataframe'] = df.to_dict('records')
+                        sheet_data['dataframe_shape'] = df.shape
+                        sheet_data['columns'] = df.columns.tolist()
+                    else:
+                        sheet_data['dataframe'] = []
+                        sheet_data['dataframe_shape'] = (0, 0)
+                        sheet_data['columns'] = []
+
+                except Exception as e:
+                    print(f"Could not convert sheet '{sheet_name}' to DataFrame: {e}")
+                    sheet_data['dataframe'] = []
+                    sheet_data['dataframe_shape'] = (0, 0)
+                    sheet_data['columns'] = []
 
             content['sheets'].append(sheet_data)
+            content['metadata']['sheet_analysis'].append(sheet_data['analysis'])
 
         return content
 
     @staticmethod
     def extract_csv(file_path):
-        """Extract data from CSV files"""
         content = {
             'filename': Path(file_path).name,
             'data': [],
             'dataframe': None,
-            'metadata': {}
+            'metadata': {
+                'encoding': 'unknown',
+                'delimiter': 'unknown',
+                'data_quality': 0.0
+            }
         }
 
-        try:
-            # Try reading with pandas (handles various encodings and delimiters)
-            df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='skip')
+        # Try multiple encodings
+        encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
 
-            content['dataframe'] = df.to_dict('records')
-            content['dataframe_shape'] = df.shape
-            content['columns'] = df.columns.tolist()
-            content['metadata']['rows'] = len(df)
-            content['metadata']['columns'] = len(df.columns)
-
-            # Also store raw data
-            content['data'] = [df.columns.tolist()] + df.values.tolist()
-
-        except Exception as e:
-            print(f"Error reading CSV with pandas: {e}")
-            # Fallback to basic reading
+        for encoding in encodings:
             try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    import csv
-                    reader = csv.reader(f)
-                    content['data'] = list(reader)
-                    if content['data']:
-                        content['metadata']['rows'] = len(content['data'])
-                        content['metadata']['columns'] = len(content['data'][0]) if content['data'] else 0
-            except Exception as e2:
-                print(f"Error reading CSV file: {e2}")
+                df = pd.read_csv(file_path, encoding=encoding, on_bad_lines='skip')
+                content['metadata']['encoding'] = encoding
+
+                # Detect delimiter
+                with open(file_path, 'r', encoding=encoding) as f:
+                    sample = f.read(1024)
+                    delimiters = [',', ';', '\t', '|']
+                    delimiter_counts = {delim: sample.count(delim) for delim in delimiters}
+                    content['metadata']['delimiter'] = max(delimiter_counts, key=delimiter_counts.get)
+
+                # Calculate data quality
+                total_cells = df.size
+                non_null_cells = df.count().sum()
+                content['metadata']['data_quality'] = non_null_cells / total_cells if total_cells > 0 else 0
+
+                content['dataframe'] = df.to_dict('records')
+                content['dataframe_shape'] = df.shape
+                content['columns'] = df.columns.tolist()
+                content['metadata']['rows'] = len(df)
+                content['metadata']['columns'] = len(df.columns)
+
+                # Store raw data
+                content['data'] = [df.columns.tolist()] + df.values.tolist()
+                break
+
+            except Exception as e:
+                continue
 
         return content
 
@@ -514,8 +603,7 @@ class EmailProcessor:
                 except Exception as e:
                     print(f"[CSV] Error processing {file_path}: {e}")
 
-
-            # PDF - OCR Processing - FIXED
+            # PDF - OCR Processing
             if ext in ['.pdf']:
                 try:
                     pdf_start = time.time()
@@ -740,6 +828,180 @@ class EmailProcessor:
 
         return attachment_texts
 
+
+class LocalLLMProcessor:
+    """Process LLM requests using local Ollama with Qwen 3 4B"""
+
+    def __init__(self, model_name=None):
+        self.model_name = model_name or OLLAMA_CONFIG["model_name"]
+
+    def test_connection(self):
+        """Test if local Ollama is running and model is available"""
+        try:
+            models = ollama.list()
+
+            # ListResponse object has a 'models' attribute
+            model_list = models.models if hasattr(models, 'models') else []
+
+            # Extract model names
+            model_names = []
+            for m in model_list:
+                if hasattr(m, 'model'):
+                    model_names.append(m.model)
+                elif hasattr(m, 'name'):
+                    model_names.append(m.name)
+
+            # Check if target model exists
+            if any(self.model_name in name for name in model_names):
+                print(f"Local model {self.model_name} is available")
+                return True
+            else:
+                print(f"Model {self.model_name} not found.")
+                print(f"   Available models: {model_names}")
+
+                # Try to actually use the model anyway - maybe it's there but list failed
+                try:
+                    print(f"   Attempting to use model anyway...")
+                    result = ollama.generate(
+                        model=self.model_name,
+                        prompt="test",
+                        options={'num_predict': 1}
+                    )
+                    print(f"Model {self.model_name} is actually available!")
+                    return True
+                except:
+                    print(f"   To pull the model, run: ollama pull {self.model_name}")
+                    return False
+
+        except Exception as e:
+            print(f"Cannot connect to local Ollama: {e}")
+            traceback.print_exc()
+            return False
+
+    def generate_response(self, prompt: str, max_tokens: int = 4000, temperature: float = 0.1) -> Dict[str, Any]:
+        """
+        Generate response from local Ollama model using ollama library
+
+        Args:
+            prompt: The input prompt
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature (0.0 to 1.0)
+
+        Returns:
+            Dictionary with response data and metadata
+        """
+        try:
+            start_time = time.time()
+
+            result = ollama.generate(
+                model=self.model_name,
+                prompt=prompt,
+                options={
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                    "top_p": 0.9,
+                    "top_k": 40
+                }
+            )
+
+            generation_time = time.time() - start_time
+
+            return {
+                "success": True,
+                "response": result.get("response", ""),
+                "model": result.get("model", self.model_name),
+                "generation_time": generation_time,
+                "tokens_generated": len(result.get("response", "").split()),
+                "metadata": {
+                    "prompt_length": len(prompt),
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
+                }
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "generation_time": time.time() - start_time if 'start_time' in locals() else 0
+            }
+
+    def extract_structured_data(self, llm_prompt: str) -> Dict[str, Any]:
+        """
+        Extract structured reinsurance data using the local LLM
+
+        Args:
+            llm_prompt: The formatted prompt with email and attachment data
+
+        Returns:
+            Dictionary with extracted data and processing metadata
+        """
+        print("🤖 Sending request to local Ollama...")
+
+        # Generate response
+        result = self.generate_response(
+            llm_prompt,
+            max_tokens=OLLAMA_CONFIG["max_tokens"],
+            temperature=OLLAMA_CONFIG["temperature"]
+        )
+
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result["error"],
+                "raw_response": None,
+                "extracted_data": None
+            }
+
+        # Try to parse JSON response
+        raw_response = result["response"].strip()
+
+        # Clean up response - remove any markdown formatting
+        if raw_response.startswith("```json"):
+            raw_response = raw_response[7:]
+        if raw_response.endswith("```"):
+            raw_response = raw_response[:-3]
+
+        try:
+            extracted_data = json.loads(raw_response)
+            return {
+                "success": True,
+                "raw_response": raw_response,
+                "extracted_data": extracted_data,
+                "generation_time": result["generation_time"],
+                "tokens_generated": result["tokens_generated"],
+                "model_used": result["model"]
+            }
+        except json.JSONDecodeError as e:
+            print(f"⚠️  JSON parsing failed: {e}")
+            print(f"Raw response: {raw_response[:500]}...")
+
+            # Try to extract JSON from the response
+            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+            if json_match:
+                try:
+                    extracted_data = json.loads(json_match.group())
+                    return {
+                        "success": True,
+                        "raw_response": raw_response,
+                        "extracted_data": extracted_data,
+                        "generation_time": result["generation_time"],
+                        "tokens_generated": result["tokens_generated"],
+                        "model_used": result["model"],
+                        "warning": "JSON extracted from response with regex"
+                    }
+                except json.JSONDecodeError:
+                    pass
+
+            return {
+                "success": False,
+                "error": f"JSON parsing failed: {e}",
+                "raw_response": raw_response,
+                "extracted_data": None,
+                "generation_time": result["generation_time"]
+            }
+
+
 def extract_candidates_from_text(text):
     """Return a small dict of candidate values useful as LLM hints."""
     cand = {}
@@ -917,7 +1179,7 @@ No Extra Text: The model should only output the JSON object. It must not output 
 ---TEXT BLOCK ENDS ABOVE---
 """
 
-def _truncate_keep_ends(text, max_len=11000):
+def _truncate_keep_ends(text, max_len=PROCESSING_CONFIG['max_text_length']):
     """If text > max_len, keep start and end with a truncation marker in the middle."""
     if not text or len(text) <= max_len:
         return text
@@ -969,8 +1231,9 @@ def create_llm_context(email_data, attachment_texts):
             page_info = f" (page {att.get('page')})" if att.get('page') else ""
             body_text = att.get('text', '').strip()
             # if extremely long, keep the head and tail
-            if len(body_text) > 6000:
-                body_text = body_text[:4000] + "\n\n...[ATTACHMENT TRUNCATED]...\n\n" + body_text[-1800:]
+            max_att_len = PROCESSING_CONFIG['max_attachment_length']
+            if len(body_text) > max_att_len:
+                body_text = body_text[:int(max_att_len*0.7)] + "\n\n...[ATTACHMENT TRUNCATED]...\n\n" + body_text[-int(max_att_len*0.3):]
             parts.append(header + page_info + "\n" + body_text)
 
     combined_text = "\n\n".join(parts).strip()
@@ -995,61 +1258,6 @@ def create_llm_context(email_data, attachment_texts):
 
     # Return both the structured context and the full prompt to send to the LLM
     return context, llm_prompt
-
-def process_all_subfolders(root_folder, save_json=True):
-    """Process all subfolders in root folder with progress indicators"""
-    root_path = Path(root_folder)
-
-    # Count total folders first
-    subfolders = [f for f in root_path.iterdir() if f.is_dir()]
-    total_folders = len(subfolders)
-
-    if total_folders == 0:
-        print(f"No subfolders found in {root_folder}")
-        return {}
-
-    all_results = {}
-    processed = 0
-    errors = 0
-
-    for subfolder in sorted(subfolders):
-        processed += 1
-        print(f"\n[{processed}/{total_folders}] Processing: {subfolder.name}")
-
-        try:
-            processor = EmailProcessor(subfolder)
-            data = processor.get_complete_data()
-
-            if data:
-                all_results[subfolder.name] = data
-
-                print(f"  ✓ Subject: {data['metadata']['subject']}")
-                print(f"  ✓ From: {data['metadata']['sender']}")
-                print(f"  ✓ Date: {data['metadata']['date']}")
-                print(f"  ✓ Saved attachments: {len(data['saved_attachments'])}")
-                print(f"  ✓ Recipients (To): {len(data['recipients']['to'])}")
-
-                if save_json:
-                    json_path = subfolder / 'email_data.json'
-                    with open(json_path, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    print(f"  ✓ Saved: {json_path.name}")
-            else:
-                print(f"  ✗ No .msg file found or error processing")
-                errors += 1
-
-        except Exception as e:
-            print(f"  ✗ Error processing folder: {e}")
-            errors += 1
-            import traceback
-            traceback.print_exc()
-
-    print(f"\n{'=' * 80}")
-    print(f"Processing complete: {len(all_results)} successful, {errors} errors")
-    print(f"{'=' * 80}")
-
-    return all_results
-
 
 def search_emails(all_results, search_term, field='subject'):
     """Search through extracted email data"""
@@ -1106,8 +1314,6 @@ class Detect_and_Recognize:
                     device: 'cpu' or 'gpu' or 'gpu:0,1' for multiple GPUs
                     enable_mkldnn: Enable MKL-DNN acceleration on CPU
                     cpu_threads: Number of CPU threads
-                    use_tensorrt: Use TensorRT acceleration (GPU only)
-                    precision: TensorRT precision ('fp32' or 'fp16')
                     det_limit_side_len: Max/min side length for detection
                     det_limit_type: 'max' or 'min' - how to apply side length limit
                     det_thresh: Detection threshold for text pixels
@@ -1119,28 +1325,26 @@ class Detect_and_Recognize:
                     use_textline_orientation: Enable text line orientation
         """
         self.ocr = PaddleOCR(
-            doc_orientation_classify_model_name='PP-LCNet_x1_0_doc_ori',
-            doc_orientation_classify_model_dir='PP-LCNet_x1_0_doc_ori',
-            textline_orientation_model_name='PP-LCNet_x1_0_textline_ori',
-            textline_orientation_model_dir='PP-LCNet_x1_0_textline_ori',
+            # doc_orientation_classify_model_name='PP-LCNet_x1_0_doc_ori',
+            # doc_orientation_classify_model_dir='PP-LCNet_x1_0_doc_ori',
+            # textline_orientation_model_name='PP-LCNet_x1_0_textline_ori',
+            # textline_orientation_model_dir='PP-LCNet_x1_0_textline_ori',
             text_detection_model_name='PP-OCRv5_mobile_det',
-            text_recognition_model_name='PP-OCRv5_server_rec',
+            text_recognition_model_name='PP-OCRv5_mobile_rec',
             text_detection_model_dir="PP-OCRv5_mobile_det_infer",
-            text_recognition_model_dir="PP-OCRv5_server_rec_infer",
-            use_doc_orientation_classify=True,
-            use_doc_unwarping=True,
-            use_textline_orientation=True,
-            device='cpu',
-            cpu_threads=4,
-            enable_mkldnn=True,
-            use_tensorrt=False,
-            precision='fp16',
-            det_limit_side_len=960,
+            text_recognition_model_dir="PP-OCRv5_mobile_rec_infer",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            device=OCR_CONFIG['device'],
+            cpu_threads=OCR_CONFIG['cpu_threads'],
+            enable_mkldnn=OCR_CONFIG['enable_mkldnn'],
+            det_limit_side_len=OCR_CONFIG['det_limit_side_len'],
             det_limit_type='max',
-            text_det_thresh=0.3,
-            text_det_box_thresh=0.6,
+            text_det_thresh=OCR_CONFIG['text_det_thresh'],
+            text_det_box_thresh=OCR_CONFIG['text_det_box_thresh'],
             text_det_unclip_ratio=1.5,
-            text_recognition_batch_size=8,
+            text_recognition_batch_size=OCR_CONFIG['text_recognition_batch_size'],
             ocr_version="PP-OCRv5",
         )
 
@@ -1197,55 +1401,201 @@ class Detect_and_Recognize:
         doc.close()
         return processed_images, original_images
 
+def check_ollama_installed():
+    """Check if Ollama service is responding"""
+    try:
+        models = ollama.list()
+
+        # ListResponse object has a 'models' attribute
+        if hasattr(models, 'models'):
+            model_list = models.models
+        else:
+            model_list = []
+
+        # Extract model names
+        model_names = []
+        for m in model_list:
+            if hasattr(m, 'model'):
+                model_names.append(m.model)
+            elif hasattr(m, 'name'):
+                model_names.append(m.name)
+
+        print(f"Ollama service is running")
+        print(f"   Available models: {model_names if model_names else 'None found'}")
+        return True
+    except Exception as e:
+        print(f"Cannot connect to Ollama service: {e}")
+        print("   Make sure Ollama is running")
+        return False
+
+def save_processing_results(folder_path: Path, context: Dict, llm_prompt: str, llm_result: Dict):
+    """Save all processing results to JSON files with proper timing"""
+
+    timestamp = datetime.datetime.now().isoformat()
+
+    # Save LLM context
+    context_path = folder_path / 'llm_context.json'
+    context_data = {
+        "context": context,
+        "timestamp": timestamp,
+        "metadata": {
+            "email_subject": context.get('email', {}).get('subject', ''),
+            "total_attachments": context.get('total_attachments', 0),
+            "processing_times": context.get('processing_times', {})
+        }
+    }
+    with open(context_path, 'w', encoding='utf-8') as f:
+        json.dump(context_data, f, indent=2, ensure_ascii=False)
+    print(f"✓ Saved LLM context: {context_path.name}")
+
+    # Save master prompt with LLM context
+    prompt_path = folder_path / 'master_prompt.json'
+    prompt_data = {
+        "master_prompt": llm_prompt,
+        "llm_context": context,
+        "timestamp": timestamp,
+        "prompt_length": len(llm_prompt),
+        "context_summary": {
+            "email_subject": context.get('email', {}).get('subject', ''),
+            "total_attachments": context.get('total_attachments', 0),
+            "processing_times": context.get('processing_times', {})
+        }
+    }
+    with open(prompt_path, 'w', encoding='utf-8') as f:
+        json.dump(prompt_data, f, indent=2, ensure_ascii=False)
+    print(f"✓ Saved master prompt with LLM context: {prompt_path.name}")
+
+    # Save LLM response with timing
+    if llm_result["success"]:
+        result_path = folder_path / 'llm_response.json'
+        result_data = {
+            "success": True,
+            "extracted_data": llm_result["extracted_data"],
+            "raw_response": llm_result["raw_response"],
+            "timing": {
+                "generation_time_seconds": llm_result["generation_time"],
+                "tokens_generated": llm_result["tokens_generated"],
+                "timestamp": timestamp
+            },
+            "model_info": {
+                "model_used": llm_result["model_used"],
+                "prompt_length": llm_result.get("metadata", {}).get("prompt_length", 0),
+                "temperature": llm_result.get("metadata", {}).get("temperature", 0.1),
+                "max_tokens": llm_result.get("metadata", {}).get("max_tokens", 2000)
+            }
+        }
+        with open(result_path, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, indent=2, ensure_ascii=False)
+        print(f"✓ Saved LLM response with timing: {result_path.name}")
+
+        # Also save a clean version with just the extracted data
+        clean_path = folder_path / 'extracted_reinsurance_data.json'
+        with open(clean_path, 'w', encoding='utf-8') as f:
+            json.dump(llm_result["extracted_data"], f, indent=2, ensure_ascii=False)
+        print(f"✓ Saved clean extraction: {clean_path.name}")
+
+    else:
+        error_path = folder_path / 'llm_error.json'
+        error_data = {
+            "success": False,
+            "error": llm_result["error"],
+            "raw_response": llm_result.get("raw_response", ""),
+            "timing": {
+                "generation_time_seconds": llm_result.get("generation_time", 0),
+                "timestamp": timestamp
+            }
+        }
+        with open(error_path, 'w', encoding='utf-8') as f:
+            json.dump(error_data, f, indent=2, ensure_ascii=False)
+        print(f"✗ Saved error with timing: {error_path.name}")
+
+
+def process_with_llm_integration(root_folder: str, model_name: str = None):
+    """
+    Complete pipeline: Email processing + OCR + LLM extraction
+
+    Args:
+        root_folder: Path to folder containing email subfolders
+        model_name: Local Ollama model name to use
+    """
+    check_ollama_installed()
+    # Initialize components
+    print("🚀 Initializing components...")
+
+    # Test local Ollama connection
+    llm_processor = LocalLLMProcessor(model_name)
+    if not llm_processor.test_connection():
+        print("❌ Cannot proceed without local Ollama connection")
+        return
+
+    print("Initializing OCR engine...")
+    ocr_engine = Detect_and_Recognize()
+
+    # Initialize enhanced office processor
+    office_processor = OfficeDocumentProcessor()
+
+    root_path = Path(root_folder)
+    subfolders = [f for f in root_path.iterdir() if f.is_dir()]
+
+    print(f"📁 Found {len(subfolders)} email folders to process")
+
+    for i, subfolder in enumerate(sorted(subfolders), 1):
+        print(f"\n{'=' * 60}")
+        print(f"📧 Processing folder {i}/{len(subfolders)}: {subfolder.name}")
+        print(f"{'=' * 60}")
+
+        try:
+            # Step 1: Extract email data
+            print("📨 Extracting email data...")
+            processor = EmailProcessor(subfolder)
+            email_data = processor.get_complete_data()
+
+            if not email_data:
+                print("❌ No email data found")
+                continue
+
+            print(f"✓ Email: {email_data['metadata']['subject']}")
+            print(f"✓ Attachments: {len(email_data['saved_attachments'])}")
+
+            print("📄 Processing attachments...")
+            attachment_texts = processor.process_attachments_with_ocr(
+                email_data, ocr_engine, save_visuals=PROCESSING_CONFIG['save_visuals']
+            )
+
+            # Step 3: Create LLM context
+            print("🧠 Creating LLM context...")
+            context, llm_prompt = create_llm_context(email_data, attachment_texts)
+
+            # Step 4: LLM extraction
+            print("🤖 Running LLM extraction...")
+            llm_result = llm_processor.extract_structured_data(llm_prompt)
+
+            # Step 5: Save results
+            print("💾 Saving results...")
+            save_processing_results(subfolder, context, llm_prompt, llm_result)
+
+            if llm_result["success"]:
+                print(
+                    f"✅ Success! Generated {llm_result['tokens_generated']} tokens in {llm_result['generation_time']:.2f}s")
+                # Print summary of extracted data
+                extracted = llm_result["extracted_data"]
+                print(
+                    f"📊 Extracted: {extracted.get('insured', 'N/A')} | {extracted.get('cedant', 'N/A')} | {extracted.get('total_sum_insured', 'N/A')}")
+            else:
+                print(f"❌ LLM extraction failed: {llm_result['error']}")
+
+        except Exception as e:
+            print(f"❌ Error processing {subfolder.name}: {e}")
+            traceback.print_exc()
+
+    print(f"\n🎉 Processing complete!")
+
 
 if __name__ == "__main__":
     root_folder = "test dataset one"
+    model_name = OLLAMA_CONFIG['model_name']
+    process_with_llm_integration(root_folder, model_name)
 
-    # Initialize OCR engine
-    print("Initializing OCR engine...")
-    init_start = time.time()
-    ocr_engine = Detect_and_Recognize()
-    print(f"OCR initialization: {time.time() - init_start:.2f}s\n")
-
-    total_start = time.time()
-
-    # Step 1: Extract email data
-    print("Step 1: Processing emails...")
-    email_start = time.time()
-    results = process_all_subfolders(root_folder, save_json=True)
-    print(f"Email processing: {time.time() - email_start:.2f}s\n")
-
-    # Step 2: OCR attachments
-    print("Step 2: Processing attachments with OCR...")
-    ocr_start = time.time()
-
-    for folder_name, email_data in results.items():
-        folder_start = time.time()
-        print(f"\n[Folder: {folder_name}]")
-
-        processor = EmailProcessor(Path(root_folder) / folder_name)
-        attachment_texts = processor.process_attachments_with_ocr(
-            email_data,
-            ocr_engine,
-            save_visuals=True
-        )
-
-        # Step 3: Create LLM context
-        context_start = time.time()
-        context, llm_text = create_llm_context(email_data, attachment_texts)
-        context_time = time.time() - context_start
-
-        # Save combined context
-        output_path = Path(root_folder) / folder_name / 'llm_context.json'
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(context, f, indent=2, ensure_ascii=False)
-
-        folder_time = time.time() - folder_start
-        print(f"  Context creation: {context_time:.2f}s")
-        print(f"  Folder total: {folder_time:.2f}s")
-
-    print(f"\nOCR processing: {time.time() - ocr_start:.2f}s")
-    print(f"Total processing time: {time.time() - total_start:.2f}s")
 
 
 
