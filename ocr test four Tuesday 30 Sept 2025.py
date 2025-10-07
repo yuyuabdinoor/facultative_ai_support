@@ -604,7 +604,7 @@ class EmailProcessor:
                     print(f"[CSV] Error processing {file_path}: {e}")
 
             # PDF - OCR Processing
-            if ext in ['.pdf']:
+            elif ext in ['.pdf']:
                 try:
                     pdf_start = time.time()
                     images, originals = ocr_engine.pdf_to_images(file_path)
@@ -1162,7 +1162,7 @@ Words like “Excess”, “Deductible” → excess_deductible.
 
 “Inward acceptances” → inward_acceptances.
 
-“Surveyor report” → risk_surveyor_report.
+“Surveyor report” → risk_surveyor_report or survey report, the report itself might be one of the attachments so look for the file name; risk_surveyor_report or survey report or risk report .
 
 “Premium rate” → premium_rates.
 
@@ -1339,13 +1339,13 @@ class Detect_and_Recognize:
             device=OCR_CONFIG['device'],
             cpu_threads=OCR_CONFIG['cpu_threads'],
             enable_mkldnn=OCR_CONFIG['enable_mkldnn'],
-            det_limit_side_len=OCR_CONFIG['det_limit_side_len'],
-            det_limit_type='max',
+            text_det_limit_side_len=OCR_CONFIG['det_limit_side_len'],
+            text_det_limit_type='max',
             text_det_thresh=OCR_CONFIG['text_det_thresh'],
             text_det_box_thresh=OCR_CONFIG['text_det_box_thresh'],
             text_det_unclip_ratio=1.5,
             text_recognition_batch_size=OCR_CONFIG['text_recognition_batch_size'],
-            ocr_version="PP-OCRv5",
+            # ocr_version="PP-OCRv5",
         )
 
     def ocr_with_detection_and_recognition(self, input_path):
@@ -1531,9 +1531,6 @@ def process_with_llm_integration(root_folder: str, model_name: str = None):
     print("Initializing OCR engine...")
     ocr_engine = Detect_and_Recognize()
 
-    # Initialize enhanced office processor
-    office_processor = OfficeDocumentProcessor()
-
     root_path = Path(root_folder)
     subfolders = [f for f in root_path.iterdir() if f.is_dir()]
 
@@ -1568,8 +1565,9 @@ def process_with_llm_integration(root_folder: str, model_name: str = None):
 
             # Step 4: LLM extraction
             print("🤖 Running LLM extraction...")
+            x = time.time()
             llm_result = llm_processor.extract_structured_data(llm_prompt)
-
+            print(f'Response generation took; {time.time() - x} seconds')
             # Step 5: Save results
             print("💾 Saving results...")
             save_processing_results(subfolder, context, llm_prompt, llm_result)
@@ -1592,7 +1590,7 @@ def process_with_llm_integration(root_folder: str, model_name: str = None):
 
 
 if __name__ == "__main__":
-    root_folder = "test dataset one"
+    root_folder = "tuesday test data"
     model_name = OLLAMA_CONFIG['model_name']
     process_with_llm_integration(root_folder, model_name)
 
