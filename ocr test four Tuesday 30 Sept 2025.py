@@ -20,6 +20,9 @@ from PIL import Image
 import re
 from config import OLLAMA_CONFIG, OCR_CONFIG, PROCESSING_CONFIG
 
+#test ='mychen76/qwen3_cline_roocode:4b'
+#embedding = 'qwen3-embedding:0.6b'
+
 class OfficeDocumentProcessor:
     """Process Office documents (docx, pptx, xlsx, csv) with table extraction"""
     @staticmethod
@@ -1159,7 +1162,7 @@ Words like “Excess”, “Deductible” → excess_deductible.
 
 “Inward acceptances” → inward_acceptances.
 
-“Surveyor report” → risk_surveyor_report or survey report, the report itself might be one of the attachments so look for the file name; risk_surveyor_report or survey report or risk report .
+“Surveyor report” → risk_surveyor_report or survey report or risk report.
 
 “Premium rate” → premium_rates.
 
@@ -1590,7 +1593,6 @@ if __name__ == "__main__":
     root_folder = "tuesday test data"
     model_name = OLLAMA_CONFIG['model_name']
     process_with_llm_integration(root_folder, model_name)
-
 
 
 
