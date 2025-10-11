@@ -13,11 +13,8 @@ from paddleocr import PaddleOCR
 from pptx import Presentation
 from tqdm import tqdm
 
-from config import OLLAMA_CONFIG, OCR_CONFIG, PROCESSING_CONFIG
+from config import OLLAMA_CONFIG, OCR_CONFIG, PROCESSING_CONFIG, CACHE_CONFIG
 from utility import *
-
-# Global metrics collector
-_metrics = MetricsCollector()
 
 
 @dataclass
@@ -60,7 +57,7 @@ class StreamingPDFProcessor:
         self.quality_controller = AdaptiveQualityController(initial_dpi) if enable_adaptive_quality else None
         self.logger = get_logger(__name__)
 
-    @track_performance(_metrics, 'pdf.open')
+    @track_performance('pdf.open')
     def get_pdf_info(self, pdf_path: Path) -> Dict[str, Any]:
         """
         Get PDF metadata without loading pages.
@@ -121,7 +118,7 @@ class StreamingPDFProcessor:
             if self.quality_controller:
                 self.quality_controller.reduce_quality()
 
-    @track_performance(_metrics, 'pdf.process_page')
+    @track_performance('pdf.process_page')
     def process_page(
             self,
             doc: fitz.Document,
@@ -960,10 +957,11 @@ class EmailProcessor:
         Returns:
             Path to .msg file if found, None otherwise
         """
-        msg_files: List[Path] = list(self.subfolder_path.glob('*.msg'))
-        if msg_files:
-            self.msg_file = msg_files[0]
-            return self.msg_file
+        # iterate entries and match suffix case-insensitively
+        for p in sorted(self.subfolder_path.iterdir(), key=lambda x: x.name.lower()):
+            if p.is_file() and p.suffix.lower() == ".msg":
+                self.msg_file = p
+                return p
         return None
 
     def _safe_str(self, value: Any) -> Optional[str]:
@@ -1145,7 +1143,7 @@ class EmailProcessor:
         # If saving visuals, create timestamped output root in the email folder
         out_root: Optional[Path] = None
         if save_visuals:
-            ts: str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            ts: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             out_root = Path(self.subfolder_path) / "text_detected_and_recognized" / ts
             out_root.mkdir(parents=True, exist_ok=True)
             tqdm.write(f"[OCR] Saving visuals to: {out_root}")
@@ -1171,12 +1169,39 @@ class EmailProcessor:
                 try:
                     content: Dict[str, Any] = office_processor.extract_docx(file_path)
 
-                    # Extract all text for LLM context
-                    text_parts: List[str] = content['paragraphs'].copy()
+                    # Extract all text for LLM context with style hints
+                    text_parts: List[str] = []
+
+                    # Extract paragraph text with heading markers
+                    for para in content['paragraphs']:
+                        if isinstance(para, dict):
+                            text = para['text']
+                            style = para.get('style', 'Normal')
+
+                            # Add heading markers for important sections
+                            if 'Heading' in style:
+                                text = f"\n## {text} ##\n"
+
+                            text_parts.append(text)
+                        else:
+                            text_parts.append(str(para))
+
+                    # Extract table text
                     for table in content['tables']:
+                        # Check if table has header row
+                        has_header = table.get('validation', {}).get('has_header', False)
+
                         table_text: str = f"\n[TABLE {table['table_number']} - {table['rows']}x{table['columns']}]\n"
-                        for row in table['data']:
-                            table_text += " | ".join(str(cell) for cell in row) + "\n"
+
+                        for row_idx, row in enumerate(table['data']):
+                            row_text = " | ".join(str(cell) for cell in row)
+
+                            # Mark header rows
+                            if row_idx == 0 and has_header:
+                                row_text = f"HEADER: {row_text}"
+
+                            table_text += row_text + "\n"
+
                         text_parts.append(table_text)
 
                     full_text: str = "\n".join(text_parts)
@@ -1196,6 +1221,7 @@ class EmailProcessor:
 
                 except Exception as e:
                     tqdm.write(f"[DOCX] Error processing {file_path}: {e}")
+                    traceback.print_exc()
 
             elif ext in x[x.index('.pptx')]:
                 try:
@@ -1851,197 +1877,6 @@ class Support:
                 }
 
 
-#
-# MASTER_PROMPT: str = """
-# Solve problems by breaking them down into clear steps. Follow this structured approach:
-#
-# 1. Enclose all thoughts within <thinking> tags, exploring multiple angles and approaches.
-# 2. Break down the solution into clear steps using <step> tags.
-# 3. Start with a 20-step budget. Use <count> tags after each step to show the remaining budget. Stop when reaching 0.
-# 4. Continuously adjust your reasoning based on intermediate results and reflections.
-# 5. Regularly evaluate progress using <reflection> tags. Be critical and honest about your reasoning process.
-# 6. Assign a quality score between 0.0 and 1.0 using <reward> tags after each reflection, guiding your approach:
-# * 0.8+: Continue current approach
-# * 0.5-0.7: Consider minor adjustments
-# * Below 0.5: Seriously consider backtracking and trying a different approach
-# 7. If unsure or if the reward score is low, backtrack and try a different approach, explaining your decision within <thinking> tags.
-# 8. For mathematical problems, show all work explicitly using LaTeX for formal notation and provide detailed proofs.
-# 9. Explore multiple solutions individually if possible, comparing approaches in reflections.
-# 10. Use thoughts as a scratchpad, writing out all calculations and reasoning explicitly.
-# 11. Synthesize the final answer within <answer> tags, providing a clear, concise summary.
-# 12. Conclude with a final reflection on the overall solution, discussing effectiveness, challenges, and solutions.
-#
-# You are given the text of a single email and any OCR-extracted text from its attachments (only regions with confidence â‰¥ 0.7). Use this context to extract reinsurance information and output it as a JSON object.
-#
-# Fields to extract
-#
-# insured: The original client (company/individual) that owns the risk. For example, a factory owner, airline, or shipping company. (string).
-#
-# cedant: The insurance company that issued the original policy and is now passing part of the risk to the reinsurer. (string).
-#
-# broker: The intermediary who facilitates the facultative placement between the cedant and the reinsurer. (string).
-#
-# occupation_of_insured: The business/industry of the insured (e.g., manufacturer, hospital, power plant). (string).
-#
-# main_activities: The core operations the insured undertakes (e.g., textile production, aviation services)..
-#
-# perils_covered: The specific risks being insured (e.g., fire, explosion, flood, earthquake, machinery breakdown).
-#
-# geographical_limit: Where the insurance coverage applies (e.g., Kenya, East Africa, Worldwide). Geographical territory or limits (string).
-#
-# situation_of_risk: Location or situation of the risk. Physical location of the risk (like factory address, oil rig site) or the route if it’s marine cargo. (string).
-#
-# total_sum_insured_and_breakdown: The full value insured under the facultative placement, with details of major components (e.g., buildings, machinery, stock). total_sum_insured_and_breakdown (numeric part only, as string).
-#
-# total_sum_insured_float: total_sum_insured_and_breakdown sum as a number (float).
-#
-# currency: Currency of the insured sum (string).
-#
-# period_of_insurance: Insurance coverage period (dates or description), Duration of coverage (e.g., 12 months from 01/01/2025 to 31/12/2025).(string).
-#
-# excess_deductible: The amount of loss the insured must bear before the insurance or reinsurance responds. Excess or deductible (string; use "TBD" if unknown).
-#
-# retention_of_cedant: Cedant's retention. The share of risk that the cedant keeps before ceding the rest to reinsurers. (string; use "TBD" if unknown).
-#
-# possible_maximum_loss: Possible maximum loss. The reinsurer’s estimate of the maximum probable loss if a major event occurs. Expressed as a percentage of TSI. (string; use "TBD" if unknown).
-#
-# cat_exposure: Catastrophe exposure (string; use "TBD" if unknown).
-#
-# claims_experience: Claims experience details. Record of claims made under similar policies in the last three years — frequency, severity, and causes. (string; use "TBD" if unknown).
-#
-# reinsurance_deductions: Any specific deductions applicable under the reinsurance contract (e.g., brokerage, taxes). (string; use "TBD" if unknown).
-#
-# share_offered: The portion of the facultative risk being offered to this reinsurer by the cedant/broker. (string; use "TBD" if unknown).
-#
-# inward_acceptances: Refers to risks accepted from another cedant’s treaty or reinsurance inward flow (rarely used). (string; use "TBD" if unknown).
-#
-# risk_surveyor_report: Technical inspection report on the risk, if available (e.g., safety measures, construction quality, fire protection). (string; use "TBD" if unknown).
-#
-# premium_rates: Pricing rate applied to the sum insured (percentage or per million). (string; use "TBD" if unknown).
-#
-# premium: Premium amount.Actual premium payable, in original currency. (string; use "TBD" if unknown).
-#
-# climate_change_risk_factors: Assessment of whether the insured is highly, moderately, or minimally exposed to climate-related risks. (string; use "TBD" if unknown).
-#
-# esg_risk_assessment: Evaluation of Environmental, Social, and Governance risk levels (Low/Medium/High). (string; use "TBD" if unknown).
-#
-# country: Country of the risk or insured (string).
-#
-# Extraction Instructions
-#
-# Computation Formulas
-# 1) Premium Rate (when Premium and TSI are given)
-# As a percentage
-# Formula: Rate % = (Premium ÷ TSI) × 100
-# Excel: =Premium/TSI*100
-#
-# As per million (‰)
-# Formula: Rate ‰ = (Premium ÷ TSI) × 1000
-# Excel: =Premium/TSI*1000
-#
-# Tip: Use either % or ‰ consistently (don’t mix them).
-# 2) Premium (when Rate and TSI are given)
-# If rate is a percentage
-# Formula: Premium = TSI × (Rate % ÷ 100)
-# Excel: =TSI*Rate_percent/100
-#
-# If rate is per mille (‰)
-# Formula: Premium = TSI × (Rate ‰ ÷ 1000)
-# Excel: =TSI*Rate_permille/1000
-# 3) Loss Ratio
-# Formula (standard): Loss Ratio % = {Incurred Losses ÷ Earned Premium(for 3 years, assumed with the current premium)} × 100
-# Where Incurred Losses = Paid Losses + Outstanding Reserves – Recoveries (for the 3 years)
-#
-# Excel: =(Paid + Outstanding - Recoveries)/Earned_Premium*100
-#
-# Tip: Use earned premium for the same period as the losses.
-# Facultative Share Calculations
-# Accepted Premium = Gross Premium × Accepted Share %
-# Accepted Liability = TSI × Accepted Share %
-# Loss Ratio (accepted share) = (Your Incurred Losses ÷ Your Earned Premium) × 100
-# Worked Example
-# TSI = KES 500,000,000
-# Premium = KES 1,250,000
-#
-# Rate % = (1,250,000 ÷ 500,000,000) × 100 = 0.25%
-# Rate ‰ = (1,250,000 ÷ 500,000,000) × 1000 = 2.5‰
-#
-# Given Rate % = 0.25% and TSI = 500,000,000:
-# Premium = 500,000,000 × 0.25% = KES 1,250,000
-#
-# If during the year:
-# Paid = KES 300,000
-# Outstanding = KES 100,000
-# Recoveries = KES 50,000
-# Earned Premium = KES 1,000,000
-#
-# Loss Ratio = (300,000 + 100,000 − 50,000) / 1,000,000 × 100 = 35%
-#
-# Remember:
-# TSI (Total Sum Insured), decide gross vs net (after brokerage, taxes, levies) and be consistent, keep units straight (%, ‰), for multi-currency placements, compute in the original currency.
-#
-# Output Format: Provide exactly one valid JSON object with all the fields above. Do not include any additional keys or text. Do not output markdown or code fencesâ€”only raw JSON.
-#
-# Missing Values: If a field's value is not present or is unclear in the text, set it to "TBD" (the string).
-#
-# Value Types: All values should be strings except for total_sum_insured_float, which must be a numeric value (no quotes). For total_sum_insured_and_breakdown, strip any formatting so it's a plain number as a string. Use a standard currency code or symbol for currency.
-#
-# Semantic Mapping: The text may use different terms or synonyms. Use context to map them to the correct fields. For example:
-#
-# Words like "Insured", "Assured", or the policyholder's name â†’ insured.
-#
-# "Cedant", "Ceding insurer", or similar â†’ cedant.
-#
-# "Broker" or "Intermediary" â†’ broker.
-#
-# Descriptions of the insured's job or role â†’ occupation_of_insured.
-#
-# Descriptions of business or operations â†’ main_activities.
-#
-# Phrases like "covered perils", "risks" â†’ perils_covered.
-#
-# Territory or country names â†’ geographical_limit or country as appropriate.
-#
-# Locations or site descriptions â†’ situation_of_risk.
-#
-# Amounts with currency (e.g. "USD 100000") â†’ total_sum_insured (e.g. "100000"), currency (e.g. "USD"), total_sum_insured_float (e.g. 100000.0).
-#
-# Date ranges or terms like "from"/"to" â†’ period_of_insurance.
-#
-# Words like "Excess", "Deductible" â†’ excess_deductible.
-#
-# "Retention" â†’ retention_of_cedant.
-#
-# "Maximum loss", "PML" â†’ possible_maximum_loss.
-#
-# "Cat exposure" or "Catastrophe" â†’ cat_exposure.
-#
-# "Claims experience" â†’ claims_experience.
-#
-# "Reinsurance deductions" â†’ reinsurance_deductions.
-#
-# "Share offered" â†’ share_offered.
-#
-# "Inward acceptances" â†’ inward_acceptances.
-#
-# "Surveyor report" â†’ risk_surveyor_report or survey report or risk report.
-#
-# "Premium rate" â†’ premium_rates.
-#
-# "Premium" (amount) â†’ premium.
-#
-# "Climate risk factors" â†’ climate_change_risk_factors.
-#
-# "ESG" or "sustainability" terms â†’ esg_risk_assessment.
-#
-# Finally, after solving task, No Extra Text: The model should only output the JSON object. It must not output any explanatory text or additional formatting. Ensure the JSON is syntactically correct and exactly matches the fields above.
-#
-# ---TEXT BLOCK STARTS BELOW---
-# {LLM_INPUT}
-# ---TEXT BLOCK ENDS ABOVE---
-#
-# """
-
 MASTER_PROMPT: str = """You are a reinsurance data extraction specialist. Extract structured information from the provided email and attachments into valid JSON format.
 
 # CRITICAL OUTPUT REQUIREMENTS
@@ -2232,52 +2067,6 @@ When uncertain or inconsistent data found, append note to field:
 - Reinsurance_type: If 100% quota share or specific risk → likely Facultative
 - Coverage_basis: If retention% mentioned → Proportional; if excess mentioned → Non-Proportional
 
-# OUTPUT EXAMPLE
-{
-  "insured": "ABC Manufacturing Ltd",
-  "cedant": "XYZ Insurance Company",
-  "broker": "Global Re Brokers",
-  "policy_reference": "FAC/2025/001234",
-  "email_subject": "Facultative Placement - ABC Manufacturing Fire Risk",
-  "reinsurance_type": "Facultative",
-  "coverage_basis": "Proportional - Quota Share",
-  "layer_structure": "TBD",
-  "occupation_of_insured": "Textile Manufacturing",
-  "main_activities": "Production of industrial fabrics, garments, and textile accessories for export",
-  "perils_covered": "Fire, Lightning, Explosion, Aircraft Damage, Riot & Strike, Malicious Damage, Storm, Flood, Earthquake",
-  "geographical_limit": "East Africa (Kenya, Uganda, Tanzania)",
-  "situation_of_risk": "Factory premises at Plot 123, Industrial Area, Mombasa Road, Nairobi, Kenya",
-  "country": "Kenya",
-  "total_sum_insured_and_breakdown": "Building: KES 50,000,000 | Plant & Machinery: KES 150,000,000 | Stock: KES 30,000,000 | Total: KES 230,000,000",
-  "total_sum_insured_float": 230000000.0,
-  "currency": "KES",
-  "premium": "KES 575,000",
-  "premium_rates": "0.25% of TSI",
-  "period_of_insurance": "01/01/2025 to 31/12/2025 (12 months)",
-  "valuation_basis": "Replacement Cost",
-  "retention_of_cedant": "30% (KES 69,000,000)",
-  "share_offered": "70% (KES 161,000,000)",
-  "excess_deductible": "KES 500,000 each and every loss",
-  "reinstatements": "TBD",
-  "commission_rate": "Brokerage: 5% | No overriding commission",
-  "profit_commission": "TBD",
-  "aggregate_limit": "TBD",
-  "possible_maximum_loss": "60% of TSI (KES 138,000,000)",
-  "cat_exposure": "Low - Building located in non-seismic zone, adequate flood protection",
-  "claims_experience": "2022: 1 claim KES 200,000 (minor fire) | 2023: 2 claims totaling KES 450,000 (water damage, theft) | 2024: Nil claims | Loss Ratio: 26% (650K losses / 2.5M premium over 3 years)",
-  "risk_surveyor_report": "Survey conducted Dec 2024. Good housekeeping observed. Adequate fire protection systems (sprinklers, hydrants, extinguishers). 24/7 security. Building construction: concrete/steel frame. Recommendation: Install smoke detectors in warehouse section.",
-  "loss_ratio": "26% (3-year average)",
-  "co_reinsurers": "TBD",
-  "lead_reinsurer": "TBD",
-  "reinsurance_deductions": "Brokerage: 5% | Withholding Tax: 5% | Levy: 0.25%",
-  "inward_acceptances": "TBD",
-  "warranties_conditions": "Warranted that 24-hour security maintained. Warranted fire drill conducted quarterly.",
-  "territorial_exclusions": "None",
-  "climate_change_risk_factors": "Moderate - Increasing flood risk in Nairobi region, but site elevated. Consider future climate projections.",
-  "esg_risk_assessment": "Medium - Factory has basic environmental controls. No major social/governance concerns noted.",
-  "cyber_risk_exposure": "TBD",
-  "pandemic_exclusions": "TBD"
-}
 
 # FINAL CHECKLIST BEFORE OUTPUT
 □ All required fields present (even if "TBD")
@@ -2568,13 +2357,25 @@ def run_pipeline(root_folder: str, model_name: str = None, skip_processed: bool 
         root_path
     )
 
-    if not health_checker.is_system_healthy():
-        logger.error("Health checks failed", extra={'health': health_checker.get_health_summary()})
+    critical_checks = ['ollama', 'filesystem']
+    critical_failed = any(
+        not health_results[comp].healthy
+        for comp in critical_checks
+        if comp in health_results
+    )
+
+    if critical_failed:
+        logger.error("Critical health checks failed - cannot proceed")
         return
 
-    logger.info("Health checks passed", extra={'health': health_checker.get_health_summary()})
+    # Warn about memory but continue
+    if not health_results.get('memory').healthy:
+        logger.warning("Memory usage high - continuing with caution")
+        logger.warning("Consider closing other applications")
+    else:
+        logger.info("All health checks passed")
 
-    # 3. Initialize components with logging
+    # 3 Continue with pipeline...
     logger.info("Initializing components...")
 
     with Support(model_name) as ds:
@@ -2603,25 +2404,24 @@ def run_pipeline(root_folder: str, model_name: str = None, skip_processed: bool 
                 patterns=patterns,
                 memory_monitor=memory_monitor,
                 logger=logger,
-                skip_processed=skip_processed,
-                cache_dir=cache_dir,
-                use_model_chaining=use_model_chaining,
-                validation_model=validation_model
+                skip_processed=skip_processed
+                # cache_dir=cache_dir,
+                # use_model_chaining=use_model_chaining,
+                # validation_model=validation_model
             )
 
         logger.info("Pipeline complete")
 
         # Export metrics
         metrics_path = log_folder / "metrics.json"
-        _metrics.export_metrics(metrics_path)
+        export_metrics(metrics_path)
         logger.info(f"Metrics exported to {metrics_path}")
 
     # ds.cleanup() is automatically called here by context manager
     logger.info("Resources cleaned up")
 
 
-
-@track_performance(_metrics, 'folder.process')
+@track_performance('folder.process')
 def process_single_folder(
         subfolder: Path,
         ds: Support,
@@ -2808,6 +2608,12 @@ def process_attachments_with_cache(
 
         # Process based on file type (existing logic)
         # ... [Keep existing processing logic] ...
+
+        attachment_texts = processor.process_attachments_with_ocr(
+            email_data,
+            ds,
+            save_visuals=PROCESSING_CONFIG['save_visuals']
+        )
 
         # After successful processing, register in cache
         if out_root:
@@ -3143,5 +2949,6 @@ model_name = OLLAMA_CONFIG['model_name']
 run_pipeline(
     root_folder=root_folder,
     model_name=model_name,
-    skip_processed=PROCESSING_CONFIG['skip_processed']
+    skip_processed=PROCESSING_CONFIG['skip_processed'],
+    validation_model=CACHE_CONFIG['validation_model']
 )
