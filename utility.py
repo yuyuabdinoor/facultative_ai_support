@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import traceback
@@ -19,7 +20,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 import ollama
 import psutil
-from pydantic import BaseModel, Field, validator, root_validator, field_validator
+from pydantic import BaseModel, Field, validator, field_validator, model_validator
 
 from config import SUPPORTED_EXTENSIONS, MODEL_PATHS
 
@@ -73,7 +74,7 @@ def setup_logging(
         backup_count: int = 5
 ) -> logging.Logger:
     """
-    Setup comprehensive logging system.
+    Setup comprehensive logging system with UTF-8 support.
 
     Args:
         log_dir: Directory for log files
@@ -99,10 +100,22 @@ def setup_logging(
     # Remove existing handlers
     logger.handlers.clear()
 
-    # Console handler with colored output
+    # Console handler with UTF-8 encoding
     if enable_console:
-        console_handler = logging.StreamHandler()
+        console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
+
+        # Set UTF-8 encoding for Windows compatibility
+        if sys.platform == 'win32':
+            # Reconfigure stdout to use UTF-8
+            import io
+            sys.stdout = io.TextIOWrapper(
+                sys.stdout.buffer,
+                encoding='utf-8',
+                errors='replace',  # Replace problematic chars instead of crashing
+                line_buffering=True
+            )
+
         console_format = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
@@ -110,13 +123,14 @@ def setup_logging(
         console_handler.setFormatter(console_format)
         logger.addHandler(console_handler)
 
-    # File handler for regular logs
+    # File handler for regular logs with UTF-8
     file_format = None
     if enable_file:
         file_handler = RotatingFileHandler(
             log_dir / 'processing.log',
             maxBytes=max_bytes,
-            backupCount=backup_count
+            backupCount=backup_count,
+            encoding='utf-8'  # Explicit UTF-8 encoding
         )
         file_handler.setLevel(logging.DEBUG)
         file_format = logging.Formatter(
@@ -126,31 +140,34 @@ def setup_logging(
         file_handler.setFormatter(file_format)
         logger.addHandler(file_handler)
 
-    # JSON structured logging
+    # JSON structured logging with UTF-8
     if enable_json:
         json_handler = RotatingFileHandler(
             log_dir / 'processing.json',
             maxBytes=max_bytes,
-            backupCount=backup_count
+            backupCount=backup_count,
+            encoding='utf-8'  # Explicit UTF-8 encoding
         )
         json_handler.setLevel(logging.DEBUG)
         json_handler.setFormatter(StructuredFormatter())
         logger.addHandler(json_handler)
 
-    # Error-only file
+    # Error-only file with UTF-8
     error_handler = RotatingFileHandler(
         log_dir / 'errors.log',
         maxBytes=max_bytes,
-        backupCount=backup_count
+        backupCount=backup_count,
+        encoding='utf-8'  # Explicit UTF-8 encoding
     )
     error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(file_format)
+    error_handler.setFormatter(file_format if file_format else logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
     logger.addHandler(error_handler)
 
     logger.info(f"Logging initialized - Level: {log_level}, Dir: {log_dir}")
 
     return logger
-
 
 def get_logger(name: str) -> logging.Logger:
     """Get logger for specific module"""
@@ -331,19 +348,23 @@ class MetricsCollector:
 
         self.logger.info(f"Exported metrics to {output_path}")
 
+_global_metrics = MetricsCollector()
 
-def record_metric(_metrics: MetricsCollector, metric_name: str, value: float, **metadata):
+def record_metric(metric_name: str, value: float, **metadata):
     """Convenience function to record metric"""
-    _metrics.record(metric_name, value, **metadata)
+    _global_metrics.record(metric_name, value, **metadata)
 
 
-def get_metric_stats(_metrics: MetricsCollector, metric_name: str, window_minutes: Optional[int] = None) -> Dict[
+def get_metric_stats(metric_name: str, window_minutes: Optional[int] = None) -> Dict[
     str, float]:
     """Convenience function to get metric stats"""
-    return _metrics.get_stats(metric_name, window_minutes)
+    return _global_metrics.get_stats(metric_name, window_minutes)
 
+def export_metrics(output_path: Path):
+    """Export metrics from global collector"""
+    _global_metrics.export_metrics(output_path)
 
-def track_performance(_metrics: MetricsCollector, metric_name: Optional[str] = None):
+def track_performance(metric_name: Optional[str] = None):
     """
     Decorator to track function execution time.
 
@@ -700,9 +721,9 @@ class HealthChecker:
         # Log results
         for component, status in checks.items():
             if status.healthy:
-                self.logger.info(f"✓ {component}: {status.message}")
+                self.logger.info(f"[OK] {component}: {status.message}")
             else:
-                self.logger.error(f"✗ {component}: {status.message}")
+                self.logger.error(f"[FAIL] {component}: {status.message}")
 
         return checks
 
@@ -1223,36 +1244,36 @@ class ReinsurancePatterns:
         """
 
         types = [
-            r'Proportional(?:\s*\(Quota\s*Share\))?',  # Proportional (Quota Share)
-            r'Quota[-\s]?Share\b',  # Quota Share / Quota-Share
-            r'\bQS\b',  # QS
-            r'Surplus\b',  # Surplus
-            r'Non[-\s]?Proportional\b',  # Non-Proportional
-            r'Excess\s+of\s+Loss\b',  # Excess of Loss
+            r'Proportional(?:\s*\(Quota\s*Share\))?',
+            r'Quota[-\s]?Share\b',
+            r'\bQS\b',
+            r'Surplus\b',
+            r'Non[-\s]?Proportional\b',
+            r'Excess\s+of\s+Loss\b',
             r'Excess\s+Loss\b',
-            r'\bXoL\b',  # XoL
-            r'\bXL\b',  # XL
-            r'\bXS\b',  # XS (excess of loss shorthand)
-            r'Stop[-\s]?Loss\b',  # Stop Loss / Stop-Loss
-            r'Cat(?:astrophe)?\s+Excess\s+of\s+Loss\b',  # Catastrophe Excess of Loss
-            r'\bCat\s*XL\b',  # Cat XL
-            r'Facultative\b',  # Facultative
-            r'\bFac(?:\.)?\b',  # Fac or Fac.
-            r'Facultative\s*\/\s*Obligatory\b',  # Facultative / Obligatory
-            r'Treaty\b',  # Treaty
+            r'\bXoL\b',
+            r'\bXL\b',
+            r'\bXS\b',
+            r'Stop[-\s]?Loss\b',
+            r'Cat(?:astrophe)?\s+Excess\s+of\s+Loss\b',
+            r'\bCat\s*XL\b',
+            r'Facultative\b',
+            r'\bFac(?:\.)?\b',
+            r'Facultative\s*\/\s*Obligatory\b',
+            r'Treaty\b',
             r'Proportional\s+Treaty\b',
             r'Non[-\s]?Proportional\s+Treaty\b',
-            r'Per\s+Risk\b',  # Per Risk
-            r'Per\s+Occurrence\b',  # Per Occurrence
+            r'Per\s+Risk\b',
+            r'Per\s+Occurrence\b',
             r'Occurrence\b',
             r'Aggregate\s+Excess\b',
             r'Aggregate\s+Limit\b',
             r'Layered\b',
-            r'Follow\s+the\s+Fortunes\b',  # contractual clause often shown alongside type
+            r'Follow\s+the\s+Fortunes\b',
             r'Line\s+Slip\b'
         ]
 
-        # label variants that introduce the reinsurance type in documents
+        # Leading labels that introduce reinsurance type
         leading_labels = [
             r'Reinsurance\s+Type',
             r'Type\s+of\s+Reinsurance',
@@ -1262,16 +1283,17 @@ class ReinsurancePatterns:
             r'Type'
         ]
 
-        # build regex: label then the main type token, optionally capture following detail (brackets, dash, etc.)
+        # Build the pattern with FIXED parentheses grouping
+        # Structure: (label)(separator)(type_group)(optional_detail)
         pattern = (
-                r'(?:' + r'|'.join(leading_labels) + r')'  # leading label
-                                                     r'[:\-\s]*'  # optional separators
-                                                     r'(?P<type>(?:' + r'|'.join(
-            types) + r'))'  # capture the main recognized type token
-                     r'(?:'
-                     r'[\s\-\:]*'  # optional separator before details
-                     r'(?P<detail>[\(\[\/\-\w\s\,\.]{0,180}?))?'
-                     r')'
+                r'(?:' + r'|'.join(leading_labels) + r')'  # Match one of the leading labels
+                                                     r'[:\-\s]*'  # Optional separators (colon, dash, space)
+                                                     r'(?P<type>(?:' + r'|'.join(types) + r'))'  # Capture the main type
+                                                                                          r'(?:'  # Optional detail group (non-capturing)
+                                                                                          r'[\s\-\:]*'  # Optional separator before details
+                                                                                          r'(?P<detail>[\(\[\/\-\w\s\,\.]{0,180}?)'  # Capture detail (up to 180 chars)
+                                                                                          r')?'
+        # Detail group is optional
         )
 
         return re.compile(pattern, re.IGNORECASE)
@@ -1898,7 +1920,7 @@ class OCRMetrics(BaseModel):
     average_confidence: float = Field(0.0, ge=0.0, le=1.0)
     processing_time_seconds: float = Field(0.0, ge=0.0)
 
-    @validator('successful_pages', 'failed_pages')
+    @field_validator('successful_pages', 'failed_pages')
     def validate_page_counts(cls, v, values):
         """Ensure page counts don't exceed total"""
         if 'total_pages' in values and v > values['total_pages']:
@@ -1922,24 +1944,22 @@ class ProcessingMetrics(BaseModel):
             return 0.0
         return (self.successful_files / self.total_files) * 100
 
-
 class DateRange(BaseModel):
     """Date range with validation"""
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     raw_text: str = Field(..., min_length=1)
 
-    @root_validator
-    def validate_date_order(cls, values):
+    @model_validator(mode='after')  # Add mode='after' parameter
+    def validate_date_order(self) -> 'DateRange':
         """Ensure start date is before end date"""
-        start = values.get('start_date')
-        end = values.get('end_date')
-        if start and end and start > end:
-            raise ValueError(f"Start date {start} is after end date {end}")
-        return values
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError(f"Start date {self.start_date} is after end date {self.end_date}")
+        return self
 
-    @validator('raw_text')
-    def clean_raw_text(cls, v):
+    @field_validator('raw_text')
+    @classmethod
+    def clean_raw_text(cls, v: str) -> str:
         """Clean and normalize raw text"""
         return v.strip()
 
@@ -1950,15 +1970,17 @@ class MonetaryAmount(BaseModel):
     currency: Optional[str] = Field(None, description="Currency code or symbol")
     raw_text: str = Field(..., min_length=1)
 
-    @validator('amount')
-    def validate_reasonable_amount(cls, v):
+    @field_validator('amount')
+    @classmethod
+    def validate_reasonable_amount(cls, v: Optional[float]) -> Optional[float]:
         """Validate amount is within reasonable bounds"""
         if v is not None and v > 1e15:  # 1 quadrillion
             raise ValueError(f"Amount {v} exceeds reasonable bounds")
         return v
 
-    @validator('raw_text')
-    def clean_raw_text(cls, v):
+    @field_validator('raw_text')
+    @classmethod
+    def clean_raw_text(cls, v: str) -> str:
         """Clean and normalize raw text"""
         return v.strip()
 
@@ -1968,13 +1990,13 @@ class PercentageValue(BaseModel):
     value: Optional[float] = Field(None, ge=0, le=100)
     raw_text: str = Field(..., min_length=1)
 
-    @validator('value')
-    def round_percentage(cls, v):
+    @field_validator('value')
+    @classmethod
+    def round_percentage(cls, v: Optional[float]) -> Optional[float]:
         """Round percentage to 2 decimal places"""
         if v is not None:
             return round(v, 2)
         return v
-
 
 class ReinsuranceExtraction(BaseModel):
     """
@@ -2053,7 +2075,9 @@ class ReinsuranceExtraction(BaseModel):
     cyber_risk_exposure: str = Field("TBD", description="Cyber risk details")
     pandemic_exclusions: str = Field("TBD", description="Pandemic terms")
 
-    @validator('currency')
+
+    @field_validator('currency')
+    @classmethod
     def normalize_currency(cls, v):
         """Normalize currency to uppercase ISO code if possible"""
 
@@ -2064,7 +2088,8 @@ class ReinsuranceExtraction(BaseModel):
             return v.upper()
         return v  # Keep symbols unchanged
 
-    @validator('total_sum_insured_float')
+    @field_validator('total_sum_insured_float')
+    @classmethod
     def validate_tsi_currency_consistency(cls, v, values):
         """Ensure TSI has associated currency if numeric value present"""
         if v is not None and v > 0:
@@ -2074,7 +2099,7 @@ class ReinsuranceExtraction(BaseModel):
                 pass
         return v
 
-    @root_validator
+    @model_validator(mode='after')
     def validate_financial_consistency(cls, values):
         """Validate financial fields for consistency"""
         tsi_str = values.get('total_sum_insured', 'TBD')
@@ -2086,7 +2111,8 @@ class ReinsuranceExtraction(BaseModel):
 
         return values
 
-    @validator('*', pre=True)
+    @field_validator('*', mode='before')
+    @classmethod
     def empty_string_to_tbd(cls, v):
         """Convert empty strings to TBD"""
         if isinstance(v, str) and not v.strip():
