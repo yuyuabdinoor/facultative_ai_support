@@ -1,6 +1,7 @@
 import datetime
 import gc
 import hashlib
+import platform
 import json
 import logging
 import os
@@ -13,10 +14,11 @@ from collections import deque, defaultdict
 from dataclasses import field, dataclass
 from datetime import datetime, date, timedelta
 from enum import Enum
+from fcntl import fcntl
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Type, Callable
 
 import ollama
 import psutil
@@ -1205,13 +1207,74 @@ class ProcessingStatus(str, Enum):
 
 class ExtractionMethod(str, Enum):
     """Method used for text extraction"""
+
+    # OCR-based methods
     OCR = "ocr"
+    OCR_FALLBACK = "ocr_fallback"
+    IMAGE_OCR = "image_ocr"
+    HYBRID_OCR = "hybrid_ocr"  # PDF with both text and images
+
+    # Direct extraction methods
     DIRECT = "direct"
-    DOCX = "docx_extraction"
-    PPTX = "pptx_extraction"
-    XLSX = "xlsx_extraction"
-    CSV = "csv_extraction"
-    FALLBACK = "ocr_fallback"
+    PDF_TEXT_LAYER = "pdf_text_layer"
+
+    # Office document extraction (no images)
+    DOCX_EXTRACTION = "docx_extraction"
+    PPTX_EXTRACTION = "pptx_extraction"
+    XLSX_EXTRACTION = "xlsx_extraction"
+    CSV_EXTRACTION = "csv_extraction"
+
+    # Office document extraction WITH embedded image OCR
+    DOCX_WITH_IMAGE_OCR = "docx_extraction_with_image_ocr"
+    PPTX_WITH_IMAGE_OCR = "pptx_extraction_with_image_ocr"
+
+    @classmethod
+    def from_file_extension(cls, ext: str, has_images: bool = False) -> 'ExtractionMethod':
+        """
+        Get appropriate extraction method based on file extension.
+
+        Args:
+            ext: File extension (e.g., '.docx', '.pdf')
+            has_images: Whether the document contains embedded images
+
+        Returns:
+            Appropriate ExtractionMethod enum value
+        """
+        ext = ext.lower()
+
+        if ext == '.docx':
+            return cls.DOCX_WITH_IMAGE_OCR if has_images else cls.DOCX_EXTRACTION
+        elif ext == '.pptx':
+            return cls.PPTX_WITH_IMAGE_OCR if has_images else cls.PPTX_EXTRACTION
+        elif ext == '.xlsx':
+            return cls.XLSX_EXTRACTION
+        elif ext == '.csv':
+            return cls.CSV_EXTRACTION
+        elif ext == '.pdf':
+            return cls.PDF_TEXT_LAYER  # Default, can be overridden to OCR/HYBRID
+        elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
+            return cls.IMAGE_OCR
+        elif ext in ['.txt', '.log']:
+            return cls.DIRECT
+        else:
+            return cls.OCR_FALLBACK
+
+    @classmethod
+    def is_ocr_method(cls, method: str) -> bool:
+        """Check if method involves OCR processing"""
+        return method in [
+            cls.OCR.value,
+            cls.OCR_FALLBACK.value,
+            cls.IMAGE_OCR.value,
+            cls.HYBRID_OCR.value,
+            cls.DOCX_WITH_IMAGE_OCR.value,
+            cls.PPTX_WITH_IMAGE_OCR.value
+        ]
+
+    @classmethod
+    def requires_paddleocr(cls, method: str) -> bool:
+        """Check if method requires PaddleOCR initialization"""
+        return cls.is_ocr_method(method)
 
 
 @dataclass
@@ -2229,12 +2292,17 @@ class AttachmentMetadata(BaseModel):
     page_number: Optional[int] = Field(None, ge=1)
     ocr_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
 
-    @field_validator('file_type')
-    def normalize_file_type(cls, v):
-        """Normalize file extension"""
-        if not v.startswith('.'):
-            v = '.' + v
-        return v.lower()
+    @field_validator('extraction_method', mode='before')
+    @classmethod
+    def validate_method(cls, v):
+        """Accept both enum and string values"""
+        if isinstance(v, str):
+            # Try to convert string to enum
+            try:
+                return ExtractionMethod(v)
+            except ValueError:
+                raise ValueError(f"Invalid extraction method: {v}")
+        return v
 
 
 class EmailMetadata(BaseModel):
@@ -2307,6 +2375,402 @@ class ProcessingResult(BaseModel):
         }
 
 
+class OllamaException(Exception):
+    """
+    Base exception for Ollama-related errors.
+
+    Attributes:
+        message: Error description
+        model_name: Name of the model involved (if applicable)
+        details: Additional context about the error
+    """
+
+    def __init__(
+            self,
+            message: str,
+            model_name: Optional[str] = None,
+            details: Optional[Dict[str, Any]] = None
+    ):
+        self.message = message
+        self.model_name = model_name
+        self.details = details or {}
+
+        # Build full error message
+        full_message = message
+        if model_name:
+            full_message = f"[Model: {model_name}] {message}"
+        if details:
+            full_message += f" | Details: {details}"
+
+        super().__init__(full_message)
+
+        # Log the error
+        logger = get_logger(__name__)
+        logger.error(
+            f"OllamaException: {message}",
+            extra={
+                'custom_fields': {
+                    'model_name': model_name,
+                    'error_type': self.__class__.__name__,
+                    **details
+                }
+            }
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert exception to dictionary for serialization"""
+        return {
+            'error_type': self.__class__.__name__,
+            'message': self.message,
+            'model_name': self.model_name,
+            'details': self.details,
+            'timestamp': datetime.now().isoformat()
+        }
+
+
+class OllamaModelNotLoadedException(OllamaException):
+    """
+    Raised when attempting to use a model that is not loaded in Ollama.
+
+    This typically means:
+    - Model needs to be pulled: ollama pull <model_name>
+    - Model name is misspelled
+    - Ollama service has unloaded the model due to inactivity
+    """
+
+    def __init__(
+            self,
+            model_name: str,
+            available_models: Optional[List[str]] = None
+    ):
+        self.available_models = available_models or []
+
+        message = f"Model '{model_name}' is not loaded or available"
+
+        if available_models:
+            message += f". Available models: {', '.join(available_models[:5])}"
+            if len(available_models) > 5:
+                message += f" (and {len(available_models) - 5} more)"
+
+        details = {
+            'available_models': available_models,
+            'suggestion': f"Run: ollama pull {model_name}"
+        }
+
+        super().__init__(message, model_name=model_name, details=details)
+
+    @classmethod
+    def from_ollama_list(cls, model_name: str, models_response: Any) -> 'OllamaModelNotLoadedException':
+        """
+        Create exception from ollama.list() response.
+
+        Args:
+            model_name: The model that wasn't found
+            models_response: Response from ollama.list()
+        """
+        try:
+            model_list = models_response.models if hasattr(models_response, 'models') else []
+            available = [
+                m.model if hasattr(m, 'model') else m.name
+                for m in model_list
+            ]
+        except Exception:
+            available = []
+
+        return cls(model_name, available_models=available)
+
+
+class OllamaTimeoutException(OllamaException):
+    """
+    Raised when Ollama request exceeds timeout duration.
+
+    This can happen when:
+    - Model is loading for the first time (can take 30+ seconds)
+    - Generation is taking too long (complex prompt, low hardware)
+    - System is under heavy load
+    - Network issues (if Ollama is remote)
+    """
+
+    def __init__(
+            self,
+            model_name: str,
+            timeout_seconds: float,
+            operation: str = "generate",
+            partial_response: Optional[str] = None
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.operation = operation
+        self.partial_response = partial_response
+
+        message = (
+            f"Operation '{operation}' timed out after {timeout_seconds:.1f}s"
+        )
+
+        if partial_response:
+            message += f" (got {len(partial_response)} chars before timeout)"
+
+        details = {
+            'timeout_seconds': timeout_seconds,
+            'operation': operation,
+            'partial_response_length': len(partial_response) if partial_response else 0,
+            'suggestion': 'Increase timeout or use a faster model'
+        }
+
+        super().__init__(message, model_name=model_name, details=details)
+
+    def has_partial_response(self) -> bool:
+        """Check if any response was received before timeout"""
+        return bool(self.partial_response)
+
+
+class OllamaRateLimitException(OllamaException):
+    """
+    Raised when Ollama rate limit is exceeded.
+
+    This is application-level rate limiting, not from Ollama itself.
+    Occurs when RateLimiter prevents excessive requests.
+    """
+
+    def __init__(
+            self,
+            model_name: str,
+            wait_time_seconds: float,
+            current_tokens: float,
+            required_tokens: int = 1
+    ):
+        self.wait_time_seconds = wait_time_seconds
+        self.current_tokens = current_tokens
+        self.required_tokens = required_tokens
+
+        message = (
+            f"Rate limit exceeded. "
+            f"Need {required_tokens} token(s), have {current_tokens:.2f}. "
+            f"Wait {wait_time_seconds:.1f}s"
+        )
+
+        details = {
+            'wait_time_seconds': wait_time_seconds,
+            'current_tokens': current_tokens,
+            'required_tokens': required_tokens,
+            'suggestion': 'Wait or reduce request frequency'
+        }
+
+        super().__init__(message, model_name=model_name, details=details)
+
+    def get_wait_time(self) -> float:
+        """Get recommended wait time in seconds"""
+        return self.wait_time_seconds
+
+
+class OllamaConnectionException(OllamaException):
+    """
+    Raised when cannot connect to Ollama service.
+
+    Common causes:
+    - Ollama service not running
+    - Wrong host/port configuration
+    - Firewall blocking connection
+    - Service crashed or restarting
+    """
+
+    def __init__(
+            self,
+            message: str = "Cannot connect to Ollama service",
+            host: str = "localhost",
+            port: int = 11434,
+            original_error: Optional[Exception] = None
+    ):
+        self.host = host
+        self.port = port
+        self.original_error = original_error
+
+        full_message = f"{message} at {host}:{port}"
+
+        if original_error:
+            full_message += f" - {type(original_error).__name__}: {original_error}"
+
+        details = {
+            'host': host,
+            'port': port,
+            'original_error': str(original_error) if original_error else None,
+            'suggestion': 'Check if Ollama is running: systemctl status ollama or ollama serve'
+        }
+
+        super().__init__(full_message, details=details)
+
+
+class OllamaResponseException(OllamaException):
+    """
+    Raised when Ollama returns malformed or unexpected response.
+
+    Common causes:
+    - JSON parsing failure
+    - Missing required fields in response
+    - Unexpected response structure
+    - Empty response when content expected
+    """
+
+    def __init__(
+            self,
+            message: str,
+            model_name: str,
+            response_preview: Optional[str] = None,
+            expected_format: Optional[str] = None
+    ):
+        self.response_preview = response_preview
+        self.expected_format = expected_format
+
+        full_message = f"Invalid response: {message}"
+
+        if response_preview:
+            preview = response_preview[:200]
+            if len(response_preview) > 200:
+                preview += "..."
+            full_message += f" | Preview: {preview}"
+
+        details = {
+            'response_preview': response_preview[:500] if response_preview else None,
+            'expected_format': expected_format,
+            'suggestion': 'Check model output format or adjust parsing logic'
+        }
+
+        super().__init__(full_message, model_name=model_name, details=details)
+
+
+class OllamaMemoryException(OllamaException):
+    """
+    Raised when Ollama runs out of memory during generation.
+
+    Common causes:
+    - Model too large for available RAM/VRAM
+    - Context window too large
+    - Multiple models loaded simultaneously
+    - System memory pressure
+    """
+
+    def __init__(
+            self,
+            model_name: str,
+            memory_available_mb: Optional[float] = None,
+            memory_required_mb: Optional[float] = None,
+            context_length: Optional[int] = None
+    ):
+        self.memory_available_mb = memory_available_mb
+        self.memory_required_mb = memory_required_mb
+        self.context_length = context_length
+
+        message = "Insufficient memory for model"
+
+        if memory_available_mb and memory_required_mb:
+            message += (
+                f" (need ~{memory_required_mb:.0f}MB, "
+                f"have {memory_available_mb:.0f}MB)"
+            )
+
+        details = {
+            'memory_available_mb': memory_available_mb,
+            'memory_required_mb': memory_required_mb,
+            'context_length': context_length,
+            'suggestion': 'Use smaller model, reduce context, or close other applications'
+        }
+
+        super().__init__(message, model_name=model_name, details=details)
+
+    @classmethod
+    def from_system_info(cls, model_name: str) -> 'OllamaMemoryException':
+        """Create exception with current system memory info"""
+        try:
+            mem = psutil.virtual_memory()
+            available_mb = mem.available / (1024 * 1024)
+        except Exception:
+            available_mb = None
+
+        return cls(
+            model_name=model_name,
+            memory_available_mb=available_mb
+        )
+
+
+def retry_on_failure(
+        max_attempts: int = 3,
+        delay_seconds: float = 5.0,  # Increased from 2.0
+        backoff_multiplier: float = 2.0,
+        exceptions: Tuple[Type[Exception], ...] = (Exception,),
+        logger: Optional[logging.Logger] = None,
+        on_retry: Optional[Callable] = None
+):
+    """
+    Retry decorator with exponential backoff and optional cleanup callback.
+
+    Args:
+        max_attempts: Maximum retry attempts
+        delay_seconds: Initial delay between retries
+        backoff_multiplier: Multiply delay by this each retry
+        exceptions: Tuple of exceptions to catch
+        logger: Optional logger for retry messages
+        on_retry: Optional callback to run before each retry (e.g., cleanup)
+
+    Example:
+        @retry_on_failure(
+            max_attempts=3,
+            exceptions=(ConnectionError, TimeoutError),
+            on_retry=lambda: gc.collect()
+        )
+        def work_function():
+            ...
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            _logger = logger or get_logger(func.__module__)
+            current_delay = delay_seconds
+            last_exception = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+
+                except exceptions as e:
+                    last_exception = e
+
+                    if attempt == max_attempts:
+                        _logger.error(
+                            f"{func.__name__} failed after {max_attempts} attempts",
+                            extra={'last_error': str(e)}
+                        )
+                        raise
+
+                    _logger.warning(
+                        f"{func.__name__} attempt {attempt}/{max_attempts} failed: {e}. "
+                        f"Retrying in {current_delay:.1f}s..."
+                    )
+
+                    record_metric(
+                        f'retry.{func.__name__}',
+                        1,
+                        attempt=attempt,
+                        error_type=type(e).__name__
+                    )
+
+                    # Run cleanup callback if provided
+                    if on_retry:
+                        try:
+                            on_retry()
+                        except Exception as cleanup_error:
+                            _logger.warning(f"Retry cleanup failed: {cleanup_error}")
+
+                    time.sleep(current_delay)
+                    current_delay *= backoff_multiplier
+
+            # Should never reach here, but for type safety
+            raise last_exception
+
+        return wrapper
+
+    return decorator
+
+
 class ExtractionCache:
     """
     Manages cached extraction results to avoid reprocessing.
@@ -2326,6 +2790,7 @@ class ExtractionCache:
         self.folder_path = Path(folder_path)
         self.manifest_path = self.folder_path / "extraction_manifest.json"
         self.manifest = self._load_manifest()
+        self._lock = threading.Lock()
 
     def _load_manifest(self) -> Dict[str, Any]:
         """Load extraction manifest or create new one"""
@@ -2339,11 +2804,38 @@ class ExtractionCache:
             'last_updated': datetime.now().isoformat()
         }
 
+    @retry_on_failure(
+        max_attempts=3,
+        delay_seconds=1.0,
+        exceptions=(IOError, OSError, PermissionError),
+        logger=get_logger(__name__)
+    )
     def _save_manifest(self):
-        """Save manifest to disk"""
-        self.manifest['last_updated'] = datetime.now().isoformat()
-        with open(self.manifest_path, 'w', encoding='utf-8') as f:
-            json.dump(self.manifest, f, indent=2)
+        """Thread-safe manifest save with file locking"""
+        with self._lock:
+            self.manifest['last_updated'] = datetime.now().isoformat()
+
+            # Atomic write: write to temp, then rename
+            temp_path = self.manifest_path.with_suffix('.json.tmp')
+
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    # File lock (Unix/Linux)
+                    if platform.system() != 'Windows' and hasattr(fcntl, 'flock'):
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    # Windows: rely on atomic rename + threading lock (no action needed)
+
+                    json.dump(self.manifest, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())  # Force write to disk
+
+                # Atomic rename (POSIX-compliant)
+                temp_path.replace(self.manifest_path)
+
+            except Exception as e:
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise IOError(f"Failed to save manifest: {e}")
 
     def _hash_file(self, file_path: Path) -> str:
         """Generate SHA256 hash of file for cache validation"""
@@ -2392,27 +2884,38 @@ class ExtractionCache:
             timestamp: str,
             output_dir: Path
     ) -> None:
-        """Register OCR cache entry with proper path handling"""
+
+        """
+        Register OCR cache entry with STRICT path validation
+        """
         logger = get_logger(__name__)
-        file_name = file_path.name
-        file_hash = self._hash_file(file_path)
 
-        # Normalize both paths to be absolute
-        output_dir = Path(output_dir).resolve()
-        folder_path = Path(self.folder_path).resolve()
+        # CRITICAL: Validate all paths are resolved and safe
+        try:
+            file_path = file_path.resolve(strict=True)
+            output_dir = output_dir.resolve(strict=True)
+            folder_path = self.folder_path.resolve(strict=True)
+        except (OSError, RuntimeError) as e:
+            logger.error(f"Path resolution failed: {e}")
+            raise ValueError(f"Invalid path during cache registration: {e}")
 
-        # Try to get relative path, but if outside folder_path, store absolute
+        # MUST be under folder_path or explicitly allowed
         try:
             relative_output = output_dir.relative_to(folder_path)
             output_dir_str = str(relative_output)
         except ValueError:
-            # output_dir is not relative to folder_path, store as-is
-            # This happens when OCR output is in subfolder like "text_detected_and_recognized"
-            logger.debug(
-                f"Output dir not relative to folder, storing absolute path: {output_dir}",
-                extra={'custom_fields': {'folder': str(folder_path), 'output': str(output_dir)}}
+            # Absolute path outside folder - REJECT unless explicitly allowed
+            logger.error(
+                f"Security: Attempted cache registration outside folder boundary",
+                extra={'output': str(output_dir), 'folder': str(folder_path)}
             )
-            output_dir_str = str(output_dir)
+            raise ValueError(
+                f"Cache output directory must be within email folder: "
+                f"{output_dir} not under {folder_path}"
+            )
+
+        file_name = file_path.name
+        file_hash = self._hash_file(file_path)
 
         self.manifest['ocr_cache'][file_name] = {
             'file_hash': file_hash,
@@ -2422,11 +2925,7 @@ class ExtractionCache:
             'cached_at': datetime.now().isoformat()
         }
 
-        logger.debug(
-            f"Registered OCR cache for {file_name}",
-            extra={'custom_fields': {'method': method, 'timestamp': timestamp}}
-        )
-
+        logger.debug(f"Registered OCR cache for {file_name}")
         self._save_manifest()
 
     def has_llm_cache(self, model_name: str) -> Tuple[bool, Optional[Path]]:
@@ -2482,8 +2981,95 @@ class ExtractionCache:
 
         self._save_manifest()
 
+    def _extract_text_from_cached_data(
+            self,
+            data: Dict[str, Any],
+            ext: str
+    ) -> List[str]:
+        """
+        Extract text from cached office document data.
+        Mimics the text extraction logic in EmailProcessor.
+        """
+        text_parts = []
+
+        if ext == '.docx':
+            # Extract paragraphs
+            for para in data.get('paragraphs', []):
+                if isinstance(para, dict):
+                    text = para.get('text', '')
+                    style = para.get('style', 'Normal')
+                    if 'Heading' in style:
+                        text = f"\n## {text} ##\n"
+                    text_parts.append(text)
+
+            # Extract tables
+            for table in data.get('tables', []):
+                table_text = f"\n[TABLE {table.get('table_number', '')} - {table.get('rows', 0)}x{table.get('columns', 0)}]\n"
+                for row in table.get('data', []):
+                    table_text += " | ".join(str(cell) for cell in row) + "\n"
+                text_parts.append(table_text)
+
+        elif ext == '.pptx':
+            # Extract slides
+            for slide in data.get('slides', []):
+                slide_text = f"\n[SLIDE {slide.get('slide_number', '')}: {slide.get('title', '')}]\n"
+                for text_box in slide.get('text_boxes', []):
+                    slide_text += text_box.get('text', '') + "\n"
+                for table in slide.get('tables', []):
+                    for row in table.get('data', []):
+                        slide_text += " | ".join(str(cell) for cell in row) + "\n"
+                text_parts.append(slide_text)
+
+        elif ext == '.xlsx':
+            # Extract sheets
+            for sheet in data.get('sheets', []):
+                sheet_text = f"\n[SHEET: {sheet.get('sheet_name', '')}]\n"
+                for row in sheet.get('data', [])[:100]:  # Limit rows
+                    sheet_text += " | ".join(str(cell) if cell is not None else "" for cell in row) + "\n"
+                text_parts.append(sheet_text)
+
+        elif ext == '.csv':
+            text_parts.append(f"[CSV FILE - {data.get('metadata', {}).get('rows', 0)} rows]\n")
+            for row in data.get('data', [])[:100]:
+                text_parts.append(" | ".join(str(cell) if cell is not None else "" for cell in row))
+
+        return text_parts
+
+    def _extract_text_from_ocr_result(self, ocr_data: Dict[str, Any]) -> str:
+        """
+        Extract text from OCR result JSON.
+        Handles PaddleOCR result format.
+        """
+        text_parts = []
+
+        rec_texts = ocr_data.get('rec_texts', []) or []
+        rec_scores = ocr_data.get('rec_scores', []) or []
+
+        if rec_scores and len(rec_scores) == len(rec_texts):
+            for text, score in zip(rec_texts, rec_scores):
+                try:
+                    if float(score) >= 0.7 and str(text).strip():
+                        text_parts.append(str(text).strip())
+                except Exception:
+                    continue
+        else:
+            # No scores available, take all text
+            text_parts = [str(t).strip() for t in rec_texts if str(t).strip()]
+
+        return ' '.join(text_parts)
+
     def get_cached_ocr_data(self, file_path: Path) -> Optional[Dict[str, Any]]:
-        """Load cached OCR data with corrected path resolution"""
+        """
+        Load cached OCR data with corrected path resolution.
+
+        Handles the actual file structure:
+        text_detected_and_recognized/
+          └── {timestamp}/
+              ├── {basename}_docx_extracted.json
+              ├── {basename}_pptx_extracted.json
+              ├── {basename}_xlsx_extracted.json
+              └── {basename}_csv_extracted.json
+        """
         logger = get_logger(__name__)
 
         if not self.has_ocr_cache(file_path):
@@ -2495,32 +3081,113 @@ class ExtractionCache:
         base_name = file_path.stem
         ext = file_path.suffix.lower()
         output_dir_str = cache_info['output_dir']
-        timestamp = cache_info['latest_timestamp']
+        timestamp = cache_info['latest_timestamp']  # NOW WE USE IT!
+        method = cache_info['method']
 
+        # Resolve output directory
         if Path(output_dir_str).is_absolute():
-            output_dir = Path(output_dir_str)
+            base_output_dir = Path(output_dir_str)
         else:
-            email_folder = file_path.parent  # Assumes file is in email folder
-            output_dir = email_folder / output_dir_str
+            email_folder = file_path.parent
+            base_output_dir = email_folder / output_dir_str
+
+        # CRITICAL: Files are saved in timestamp subdirectory
+        timestamped_dir = base_output_dir / timestamp
 
         try:
             # Load based on file type
             if ext in SUPPORTED_EXTENSIONS['office']:
-                json_file = output_dir / f"{base_name}_{cache_info['method']}.json"
+                # Office files have method-specific suffixes with "_extracted"
+                # e.g., "document_docx_extracted.json"
+                json_filename = f"{base_name}_{method}_extracted.json"
+                json_file = timestamped_dir / json_filename
 
                 if not json_file.exists():
-                    logger.warning(f"Cached JSON not found: {json_file}")
-                    return None
+                    # Fallback: try without "_extracted" suffix (old format)
+                    json_file_fallback = timestamped_dir / f"{base_name}_{method}.json"
+                    if json_file_fallback.exists():
+                        json_file = json_file_fallback
+                        logger.debug(f"Using fallback cache format: {json_file.name}")
+                    else:
+                        logger.warning(f"Cached JSON not found: {json_file}")
+                        logger.debug(f"Expected: {json_file}")
+                        logger.debug(f"Also tried: {json_file_fallback}")
+                        return None
 
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     logger.debug(f"Loaded cached OCR data: {json_file.name}")
-                    return data
+
+                    text_parts = self._extract_text_from_cached_data(data, ext)
+
+                    return {
+                        'text': '\n'.join(text_parts),
+                        'method': method,
+                        'structured_content': data,
+                        'cached': True
+                    }
+
+            # For images and PDFs (OCR results)
+            elif ext in SUPPORTED_EXTENSIONS['images']:
+                # Image OCR saved in: {timestamp}/{basename}_image/ocr_result.json
+                img_dir = timestamped_dir / f"{base_name}_image"
+                ocr_json = img_dir / "ocr_result.json"
+
+                if not ocr_json.exists():
+                    logger.warning(f"Cached image OCR not found: {ocr_json}")
+                    return None
+
+                with open(ocr_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    logger.debug(f"Loaded cached image OCR: {ocr_json.name}")
+
+                    # Extract text from OCR result
+                    text = self._extract_text_from_ocr_result(data)
+
+                    return {
+                        'text': text,
+                        'method': 'ocr',
+                        'ocr_data': data,
+                        'cached': True
+                    }
+
+            elif ext in SUPPORTED_EXTENSIONS['documents']:  # PDFs
+                # PDF OCR saved in: {timestamp}/{basename}_page{N}_OCR/ocr_result.json
+                # Need to aggregate all pages
+                all_text = []
+                page_num = 1
+
+                while True:
+                    page_dir = timestamped_dir / f"{base_name}_page{page_num}_OCR"
+                    ocr_json = page_dir / "ocr_result.json"
+
+                    if not ocr_json.exists():
+                        break
+
+                    with open(ocr_json, 'r', encoding='utf-8') as f:
+                        page_data = json.load(f)
+                        page_text = self._extract_text_from_ocr_result(page_data)
+                        if page_text:
+                            all_text.append(page_text)
+
+                    page_num += 1
+
+                if all_text:
+                    logger.debug(f"Loaded cached PDF OCR: {page_num - 1} pages")
+                    return {
+                        'text': '\n\n'.join(all_text),
+                        'method': 'ocr',
+                        'pages_processed': page_num - 1,
+                        'cached': True
+                    }
+                else:
+                    logger.warning(f"No cached PDF pages found for {base_name}")
+                    return None
 
             return None
 
         except Exception as e:
-            logger.warning(f"Error loading cached OCR data: {e}", exc_info=False)
+            logger.warning(f"Error loading cached OCR data: {e}", exc_info=True)
             return None
 
     def invalidate_ocr_cache(self, file_path: Path):
