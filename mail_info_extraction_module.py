@@ -68,6 +68,12 @@ class DetectAndRecognize:
         """Destructor - ensure cleanup"""
         self.cleanup()
 
+    @retry_on_failure(
+        max_attempts=2,
+        delay_seconds=3.0,
+        exceptions=(RuntimeError, MemoryError, OSError),
+        on_retry=lambda: gc.collect()
+    )
     def ocr_with_detection_and_recognition(
             self,
             input_path: Union[str, np.ndarray, List[np.ndarray]]
@@ -188,6 +194,12 @@ class StreamingPDFProcessor:
                 self.quality_controller.reduce_quality()
 
     @track_performance('pdf.process_page')
+    @retry_on_failure(
+        max_attempts=2,
+        delay_seconds=2.0,
+        exceptions=(RuntimeError, fitz.FileDataError),
+        on_retry=lambda: gc.collect()
+    )
     def process_page(
             self,
             doc: fitz.Document,
@@ -1382,12 +1394,13 @@ class EmailProcessor:
                                 self.logger.warning(f"OCR failed on extracted image {img_info['filename']}: {e}")
 
                     full_text: str = "\n".join(text_parts)
+                    x = len(extracted_images)
                     attachment_texts.append({
                         'file': attachment['filename'],
                         'text': full_text,
-                        'method': 'docx_extraction_with_image_ocr',  # Updated method name
+                        'method': ExtractionMethod.DOCX_WITH_IMAGE_OCR if x > 0 else ExtractionMethod.DOCX_EXTRACTION,  # Updated method name
                         'structured_content': content,
-                        'images_processed': len(extracted_images),
+                        'images_processed': x,
                         'time': time.time() - start_time
                     })
 
@@ -1457,12 +1470,13 @@ class EmailProcessor:
                                     self.logger.warning(f"OCR failed on slide image: {e}")
 
                     full_text: str = "\n".join(text_parts)
+                    x = sum(len(s.get('images', [])) for s in content['slides'])
                     attachment_texts.append({
                         'file': attachment['filename'],
                         'text': full_text,
-                        'method': 'pptx_extraction_with_image_ocr',
+                        'method': ExtractionMethod.PPTX_WITH_IMAGE_OCR if x > 0 else ExtractionMethod.PPTX_EXTRACTION,
                         'structured_content': content,
-                        'images_processed': sum(len(s.get('images', [])) for s in content['slides']),
+                        'images_processed': x,
                         'time': time.time() - start_time
                     })
 
@@ -1494,7 +1508,7 @@ class EmailProcessor:
                     attachment_texts.append({
                         'file': attachment['filename'],
                         'text': full_text,
-                        'method': 'xlsx_extraction',
+                        'method': ExtractionMethod.XLSX_EXTRACTION,
                         'structured_content': content,
                         'time': time.time() - start_time
                     })
@@ -1524,7 +1538,7 @@ class EmailProcessor:
                     attachment_texts.append({
                         'file': attachment['filename'],
                         'text': full_text,
-                        'method': 'csv_extraction',
+                        'method': ExtractionMethod.CSV_EXTRACTION,
                         'structured_content': content,
                         'time': time.time() - start_time
                     })
@@ -1620,7 +1634,7 @@ class EmailProcessor:
                                     'file': attachment['filename'],
                                     'page': page_num + 1,
                                     'text': page_text,
-                                    'method': 'pdf_text_layer',
+                                    'method': ExtractionMethod.PDF_TEXT_LAYER,
                                     'source': 'text_extraction',
                                     'time': time.time() - pdf_start
                                 })
@@ -1699,7 +1713,7 @@ class EmailProcessor:
                                         'file': attachment['filename'],
                                         'page': page_num + 1,
                                         'text': ocr_text,
-                                        'method': 'ocr',
+                                        'method': ExtractionMethod.OCR if strategy == 'ocr_only' else ExtractionMethod.HYBRID_OCR,
                                         'source': 'image_ocr' if strategy == 'ocr_only' else 'hybrid_ocr',
                                         'time': time.time() - page_start,
                                         'ocr_time': ocr_time,
@@ -1802,7 +1816,7 @@ class EmailProcessor:
                         attachment_texts.append({
                             'file': attachment['filename'],
                             'text': full_text,
-                            'method': 'ocr',
+                            'method': ExtractionMethod.IMAGE_OCR,
                             'time': time.time() - img_start,
                             'ocr_time': ocr_time
                         })
@@ -1820,7 +1834,7 @@ class EmailProcessor:
                     attachment_texts.append({
                         'file': attachment['filename'],
                         'text': text,
-                        'method': 'direct',
+                        'method': ExtractionMethod.DIRECT,
                         'time': time.time() - start_time
                     })
 
@@ -2108,6 +2122,7 @@ def create_llm_context(
 
         if candidates:
             logger.debug(f"Pattern extraction found {len(candidates)} candidates")
+            record_metric('pattern.extraction.success', 1, candidate_count=len(candidates))
             hint_lines = ["\n[AUTO-EXTRACTED HINTS]:"]
             for k, v in candidates.items():
                 val_str = str(v.value if hasattr(v, 'value') else v)[:100]
