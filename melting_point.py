@@ -116,7 +116,7 @@ def process_attachments_with_cache(
                                     file_path=file_path_obj,
                                     method=new_text.get('method', 'unknown'),
                                     timestamp=timestamp,
-                                    output_dir=out_root  # Pass parent (text_detected_and_recognized)
+                                    output_dir=out_root.parent  # Pass parent (text_detected_and_recognized)
                                 )
                                 logger.debug(f"Registered cache for {att['filename']}")
                             except Exception as e:
@@ -379,85 +379,364 @@ def get_log_folder(root_folder: Path) -> Path:
     return log_folder
 
 
+def validate_startup_config() -> bool:
+    """
+    Validate all configuration before pipeline start
+    Returns True if valid, raises detailed exceptions if not
+    """
+    logger = get_logger(__name__)
+    issues = []
+
+    # 1. Validate Ollama model exists
+    try:
+        models = ollama.list()
+        model_names = [m.model if hasattr(m, 'model') else m.name
+                       for m in (models.models if hasattr(models, 'models') else [])]
+
+        if OLLAMA_CONFIG['model_name'] not in model_names:
+            issues.append(
+                f"Primary model '{OLLAMA_CONFIG['model_name']}' not found in Ollama. "
+                f"Available: {model_names[:5]}"
+            )
+    except Exception as e:
+        issues.append(f"Cannot connect to Ollama: {e}")
+
+    # 2. Validate validation model if chaining enabled
+    if CACHE_CONFIG.get('enable_model_chaining'):
+        val_model = CACHE_CONFIG.get('validation_model')
+        if not val_model:
+            issues.append("Model chaining enabled but no validation_model specified")
+        elif val_model not in model_names:
+            issues.append(f"Validation model '{val_model}' not found")
+
+    # 3. Validate OCR model paths
+    det_dir = Path(MODEL_PATHS['detection folder'])
+    rec_dir = Path(MODEL_PATHS['recognition folder'])
+
+    if not det_dir.exists():
+        logger.warning(f"OCR detection model not found at {det_dir} - will download on first use")
+
+    if not rec_dir.exists():
+        logger.warning(f"OCR recognition model not found at {rec_dir} - will download on first use")
+
+    # 4. Validate config values
+    if PROCESSING_CONFIG['max_text_length'] < 1000:
+        issues.append("max_text_length too small (< 1000)")
+
+    if OLLAMA_CONFIG['max_tokens'] > 128000:
+        issues.append("max_tokens unreasonably large (> 128k)")
+
+    if OCR_CONFIG['confidence_threshold'] < 0 or OCR_CONFIG['confidence_threshold'] > 1:
+        issues.append("confidence_threshold must be 0-1")
+
+    # 5. Check system resources
+    mem = psutil.virtual_memory()
+    if mem.available < 2 * 1024 * 1024 * 1024:  # Less than 2GB
+        logger.warning(f"Low available memory: {mem.available / 1024 ** 3:.1f}GB")
+
+    # Report
+    if issues:
+        logger.error("Configuration validation FAILED:")
+        for issue in issues:
+            logger.error(f"  ❌ {issue}")
+        raise ValueError(f"Invalid configuration: {len(issues)} issues found")
+
+    logger.info("✓ Configuration validated successfully")
+    return True
+
+
+class ProgressTracker:
+    """Track and persist pipeline progress for resumption capability"""
+
+    def __init__(self, root_path: Path):
+        self.root_path = root_path
+        self.progress_file = root_path / ".cache" / "pipeline_progress.json"
+        self.state = self._load_state()
+        self.logger = get_logger(__name__)
+
+    def _load_state(self) -> Dict[str, Any]:
+        """Load existing progress or create new"""
+        if self.progress_file.exists():
+            try:
+                with open(self.progress_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                self.logger.warning(f"Could not load progress: {e}")
+
+        return {
+            'started_at': datetime.now().isoformat(),
+            'last_updated': datetime.now().isoformat(),
+            'processed_folders': [],
+            'failed_folders': [],
+            'skipped_folders': [],
+            'total_folders': 0,
+            'status': 'running'
+        }
+
+    def _save_state(self):
+        """Atomic save of progress state"""
+        self.state['last_updated'] = datetime.now().isoformat()
+
+        temp_file = self.progress_file.with_suffix('.json.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(self.state, f, indent=2)
+            temp_file.replace(self.progress_file)
+        except Exception as e:
+            self.logger.error(f"Failed to save progress: {e}")
+
+    def mark_processed(self, folder_name: str):
+        """Mark folder as successfully processed"""
+        if folder_name not in self.state['processed_folders']:
+            self.state['processed_folders'].append(folder_name)
+            self._save_state()
+
+    def mark_failed(self, folder_name: str, error: str):
+        """Mark folder as failed with error"""
+        self.state['failed_folders'].append({
+            'folder': folder_name,
+            'error': error[:500],  # Truncate long errors
+            'timestamp': datetime.now().isoformat()
+        })
+        self._save_state()
+
+    def should_process(self, folder_name: str, skip_processed: bool = True) -> bool:
+        """Check if folder should be processed"""
+        if not skip_processed:
+            return True
+
+        return folder_name not in self.state['processed_folders']
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Get processing summary"""
+        return {
+            'total_processed': len(self.state['processed_folders']),
+            'total_failed': len(self.state['failed_folders']),
+            'total_skipped': len(self.state['skipped_folders']),
+            'success_rate': (
+                    len(self.state['processed_folders']) /
+                    max(self.state['total_folders'], 1) * 100
+            ),
+            'runtime': (
+                    datetime.fromisoformat(self.state['last_updated']) -
+                    datetime.fromisoformat(self.state['started_at'])
+            ).total_seconds()
+        }
+
+    def finalize(self, status: str = 'completed'):
+        """Mark pipeline as complete"""
+        self.state['status'] = status
+        self.state['completed_at'] = datetime.now().isoformat()
+        self._save_state()
+
+
 def run_pipeline(base_folder: str, m_name: str = None, skip_processed: bool = True):
     """
-    Main pipeline orchestration with centralized path management and shared cache
-    """
-    # STEP 1: Resolve and validate root path FIRST
-    root_path = Path(base_folder)
+    Main pipeline orchestration with centralized path management and shared cache.
 
-    # Validate it exists and is a directory
+    Args:
+        base_folder: Root directory containing email folders
+        m_name: Model name (overrides config if provided)
+        skip_processed: Skip folders already processed
+
+    Raises:
+        FileNotFoundError: If base_folder doesn't exist
+        NotADirectoryError: If base_folder is not a directory
+        OllamaModelNotLoadedException: If model not available
+        OllamaConnectionException: If cannot connect to Ollama
+    """
+
+    # STEP 0: Validate configuration FIRST (fail-fast)
+    # This checks Ollama connection, model availability, etc.
+    try:
+        validate_startup_config()
+    except (OllamaModelNotLoadedException, OllamaConnectionException) as e:
+        sys.exit(1)
+    except Exception as e:
+        sys.exit(1)
+
+    # STEP 1: Resolve and validate root path
+    root_path = Path(base_folder).resolve()
+
     if not root_path.exists():
         raise FileNotFoundError(f"Root folder does not exist: {root_path}")
     if not root_path.is_dir():
         raise NotADirectoryError(f"Path is not a directory: {root_path}")
 
-    # STEP 2: Create centralized cache ONCE at root level
+    # STEP 2: Create centralized cache at root level
     root_cache_dir = root_path / ".cache"
     root_cache_dir.mkdir(exist_ok=True)
 
-    # NEW: Create shared cache instance
     shared_cache = ExtractionCache(root_cache_dir)
+    progress = ProgressTracker(root_path)
 
     # STEP 3: Create timestamped log folder
     log_folder = get_log_folder(root_path)
     logger = setup_logging(log_folder, log_level=LogLevel.INFO)
 
+    # Banner
     logger.info("=" * 80)
     logger.info(f"Pipeline started at {datetime.now().isoformat()}")
     logger.info(f"Root path: {root_path}")
     logger.info(f"Cache dir: {root_cache_dir}")
     logger.info(f"Log folder: {log_folder}")
+    logger.info(f"Model: {m_name or OLLAMA_CONFIG['model_name']}")
+    logger.info(f"Skip processed: {skip_processed}")
     logger.info("=" * 80)
 
-    # STEP 4: Health checks
+    # STEP 4: Health checks (lightweight - already validated Ollama)
     health_checker = HealthChecker()
-    health_results = health_checker.run_all_checks(
-        m_name or OLLAMA_CONFIG['model_name'],
-        root_path
-    )
 
-    if not health_results.get('filesystem').healthy:
+    try:
+        health_results = health_checker.run_all_checks(
+            m_name or OLLAMA_CONFIG['model_name'],
+            root_path
+        )
+    except Exception as e:
+        logger.error(f"Health checks failed: {e}")
+        logger.warning("Proceeding anyway - some checks may have passed")
+        # Don't fail pipeline, just log warning
+
+    # Check critical health results
+    if 'filesystem' in health_results and not health_results['filesystem'].healthy:
         logger.error("Filesystem check failed - cannot proceed")
-        return
+        logger.error(f"Reason: {health_results['filesystem'].message}")
+        return  #Early return instead of continuing
 
-    logger.info("Health checks completed")
+    logger.info("✓ Health checks completed")
 
     # STEP 5: Initialize components ONCE
-    with PromptAndObtain(m_name) as ds:
-        rate_limiter = RateLimiter(max_operations=10, window_seconds=60)
-        input_validator = InputValidator()
-        patterns = ReinsurancePatterns()
-        memory_monitor = MemoryMonitor()
+    try:
+        # This validates model availability (fail-fast if not available)
+        with PromptAndObtain(m_name) as ds:
 
-        # STEP 6: Process folders with shared cache INSTANCE (not directory)
-        subfolders = sorted(
-            [f for f in root_path.iterdir()
-             if f.is_dir() and f.name not in ("logs", ".cache", ".prompt_cache")],
-            key=lambda x: x.name
-        )
+            #Test generation before processing
+            logger.info("Testing model generation...")
+            if not ds.test_generation():
+                logger.error("Model test generation failed - cannot proceed")
+                return
+            logger.info("✓ Model test successful")
 
-        logger.info(f"Found {len(subfolders)} folders to process")
+            # Initialize other components
+            rate_limiter = RateLimiter(max_operations=10, window_seconds=60)
+            input_validator = InputValidator()
+            patterns = ReinsurancePatterns()
+            memory_monitor = MemoryMonitor()
 
-        for subfolder in tqdm(subfolders, desc="Processing emails", unit="email"):
-            valid, errors = input_validator.validate_path(subfolder, root_path)
-            if not valid:
-                logger.warning(f"Skipping invalid folder: {errors}")
-                continue
-
-            process_single_folder(
-                subfolder=subfolder,
-                ds=ds,
-                rate_limiter=rate_limiter,
-                patterns=patterns,
-                memory_monitor=memory_monitor,
-                skip_processed=skip_processed,
-                shared_cache=shared_cache
+            # STEP 6: Discover folders to process
+            subfolders = sorted(
+                [f for f in root_path.iterdir()
+                 if f.is_dir() and f.name not in ("logs", ".cache", ".prompt_cache")],
+                key=lambda x: x.name
             )
 
-        logger.info("Pipeline complete")
-        metrics_path = log_folder / "metrics.json"
-        export_metrics(metrics_path)
+            if not subfolders:
+                logger.warning(f"No email folders found in {root_path}")
+                return
+
+            logger.info(f"Found {len(subfolders)} folders to process")
+            progress.state['total_folders'] = len(subfolders)
+
+            # STEP 7: Process each folder
+            for subfolder in tqdm(subfolders, desc="Processing emails", unit="email"):
+                # Validate folder path
+                valid, errors = input_validator.validate_path(subfolder, root_path)
+                if not valid:
+                    logger.warning(f"Skipping invalid folder {subfolder.name}: {errors}")
+                    progress.mark_failed(subfolder.name, f"Invalid path: {errors}")
+                    continue
+
+                # Check if already processed
+                if not progress.should_process(subfolder.name, skip_processed):
+                    logger.info(f"Skipping {subfolder.name} - already processed")
+                    progress.state['skipped_folders'].append(subfolder.name)
+                    continue
+
+                # Process folder
+                try:
+                    process_single_folder(
+                        subfolder=subfolder,
+                        ds=ds,
+                        rate_limiter=rate_limiter,
+                        patterns=patterns,
+                        memory_monitor=memory_monitor,
+                        skip_processed=skip_processed,
+                        shared_cache=shared_cache
+                    )
+                    progress.mark_processed(subfolder.name)
+                    logger.info(f"✓ Completed: {subfolder.name}")
+
+                except OllamaException as e:
+                    # Ollama-specific errors (timeout, memory, etc.)
+                    logger.error(
+                        f"Ollama error processing {subfolder.name}: {e.message}",
+                        extra={'custom_fields': e.details}
+                    )
+                    progress.mark_failed(subfolder.name, f"{type(e).__name__}: {e.message}")
+
+                    # Decide whether to continue or abort
+                    if isinstance(e, (OllamaConnectionException, OllamaModelNotLoadedException)):
+                        # Fatal errors - cannot continue
+                        logger.error("Fatal Ollama error - aborting pipeline")
+                        break
+                    else:
+                        # Transient errors - continue with next folder
+                        continue
+
+                except Exception as e:
+                    # Unexpected errors
+                    logger.error(
+                        f"Unexpected error processing {subfolder.name}: {type(e).__name__}: {e}",
+                        exc_info=True
+                    )
+                    progress.mark_failed(subfolder.name, str(e))
+                    continue  # Don't crash entire pipeline
+
+            # STEP 8: Finalize and report
+            progress.finalize('completed')
+            summary = progress.get_summary()
+
+            logger.info("=" * 80)
+            logger.info("PIPELINE COMPLETE")
+            logger.info(f"Total folders: {summary['total_processed'] + summary['total_failed']}")
+            logger.info(f"✓ Successful: {summary['total_processed']}")
+            logger.info(f"✗ Failed: {summary['total_failed']}")
+            logger.info(f"⊘ Skipped: {summary['total_skipped']}")
+            logger.info(f"Success rate: {summary['success_rate']:.1f}%")
+            logger.info(f"Runtime: {summary['runtime']:.1f}s")
+            logger.info("=" * 80)
+
+            # Export metrics
+            metrics_path = log_folder / "metrics.json"
+            export_metrics(metrics_path)
+            logger.info(f"Metrics exported to: {metrics_path}")
+
+    except OllamaModelNotLoadedException as e:
+        # Model not available when creating PromptAndObtain
+        logger.error(f"Model not available: {e.message}")
+        logger.error(f"Available models: {e.available_models}")
+        logger.error(f"Suggestion: {e.details.get('suggestion')}")
+        sys.exit(1)
+
+    except OllamaConnectionException as e:
+        # Cannot connect to Ollama service
+        logger.error(f"Cannot connect to Ollama: {e.message}")
+        logger.error(f"Suggestion: {e.details.get('suggestion')}")
+        sys.exit(1)
+
+    except KeyboardInterrupt:
+        # User cancelled
+        logger.warning("Pipeline interrupted by user")
+        progress.finalize('interrupted')
+        summary = progress.get_summary()
+        logger.info(f"Partial completion: {summary['total_processed']} folders processed")
+        sys.exit(130)
+
+    except Exception as e:
+        # Unexpected fatal error
+        logger.error(f"Fatal error in pipeline: {type(e).__name__}: {e}", exc_info=True)
+        progress.finalize('failed')
+        sys.exit(1)
 
 
 root_folder = "thursday evening test data version two"
@@ -467,3 +746,4 @@ run_pipeline(
     m_name=OLLAMA_CONFIG['model_name'],
     skip_processed=PROCESSING_CONFIG['skip_processed']
 )
+
