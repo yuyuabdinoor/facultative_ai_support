@@ -38,23 +38,151 @@ def validate_processing_results(folder_path: Path) -> Dict[str, Any]:
 
     return {'validation': validation, 'missing_files': missing, 'invalid_json': invalid}
 
+
 class PromptAndObtain:
-    """Set system prompt, give context and obtain model response"""
+    """
+    LLM interface with Ollama for structured extraction.
+    Set system prompt, give context and obtain model response
+
+    Features:
+    - One-time model validation at initialization
+    - Automatic retry with exponential backoff
+    - Comprehensive exception handling
+    - Resource cleanup via context manager
+    - Metrics tracking
+
+    Usage:
+        with PromptAndObtain("llama2") as support:
+            result = support.generate_response(prompt)
+    """
+
     def __init__(self, model_name: Optional[str] = None) -> None:
+        """
+        Initialize LLM support with model validation.
+
+        Args:
+            model_name: Name of Ollama model (defaults to config)
+
+        Raises:
+            OllamaModelNotLoadedException: If model not available
+            OllamaConnectionException: If cannot connect to Ollama
+        """
         self.model_name: str = model_name or OLLAMA_CONFIG["model_name"]
+        self.logger = get_logger(__name__)
+        self._validated = False
+
+        # Validate model availability at startup (fail-fast)
+        self._validate_model_at_startup()
+
+    def _validate_model_at_startup(self):
+        """
+        One-time validation when PromptAndObtain is created.
+
+        This is called ONCE per instance, not per request.
+        Ensures model is available before any generation attempts.
+
+        Raises:
+            OllamaModelNotLoadedException: Model not found
+            OllamaConnectionException: Cannot connect to Ollama
+        """
+        if self._validated:
+            return  # Already validated
+
+        try:
+            self.logger.info(f"Validating model availability: {self.model_name}")
+
+            # List available models
+            models = ollama.list()
+            model_list = models.models if hasattr(models, 'models') else []
+            model_names = [
+                m.model if hasattr(m, 'model') else m.name
+                for m in model_list
+            ]
+
+            # Check if our model exists (partial match for tags)
+            if not any(self.model_name in name for name in model_names):
+                raise OllamaModelNotLoadedException.from_ollama_list(
+                    self.model_name,
+                    models
+                )
+
+            self._validated = True
+            self.logger.info(f"✓ Model {self.model_name} validated and ready")
+            record_metric('model.validation.success', 1, model=self.model_name)
+
+        except OllamaModelNotLoadedException:
+            record_metric('model.validation.failure', 1,
+                          model=self.model_name,
+                          reason='model_not_found')
+            raise
+
+        except Exception as e:
+            record_metric('model.validation.failure', 1,
+                          model=self.model_name,
+                          reason='connection_error')
+            raise OllamaConnectionException(
+                message="Failed to validate model availability",
+                original_error=e
+            ) from e
 
     def cleanup(self):
-        """Cleanup resources - ADD THIS METHOD"""
+        """
+        Cleanup resources.
+
+        Ollama library doesn't hold persistent connections,
+        but we force garbage collection to free memory.
+        """
         try:
-            # Ollama library doesn't hold persistent connections
-            # but we can clear any cached data
             gc.collect()
-            self.logger = get_logger(__name__)
             self.logger.debug(f"Cleaned up resources for model {self.model_name}")
         except Exception as e:
             if hasattr(self, 'logger'):
                 self.logger.warning(f"Error during cleanup: {e}")
 
+    def __enter__(self):
+        """Context manager entry"""
+        self.logger.debug(f"Entered context for model {self.model_name}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - cleanup resources"""
+        self.cleanup()
+
+        # Log if exiting due to exception
+        if exc_type is not None:
+            self.logger.debug(
+                f"Exiting context due to {exc_type.__name__}: {exc_val}"
+            )
+
+        return False  # Don't suppress exceptions
+
+    def __del__(self):
+        """Destructor - ensure cleanup"""
+        try:
+            self.cleanup()
+        except:
+            pass  # Silently fail in destructor
+
+    @retry_on_failure(
+        max_attempts=3,
+        delay_seconds=10.0,
+        backoff_multiplier=2.0,
+        exceptions=(
+                # Network/connection errors
+                ConnectionError,
+                TimeoutError,
+
+                # Ollama-specific errors (our custom exceptions)
+                OllamaException,
+
+                # JSON parsing errors (malformed response)
+                json.JSONDecodeError,
+
+                # Generic RuntimeError (Ollama can raise this)
+                RuntimeError,
+        ),
+        on_retry=lambda: (gc.collect(), time.sleep(2))  # Cleanup callback
+    )
     def generate_response(
             self,
             prompt: str,
@@ -65,26 +193,48 @@ class PromptAndObtain:
             top_p: float = 0.9
     ) -> Dict[str, Any]:
         """
-        Generate response from local Ollama model using ollama library
+        Generate response from Ollama model with retry logic.
+
+        Model availability was already checked at __init__.
+        If model becomes unavailable mid-run, retry logic will handle it.
 
         Args:
-            prompt: The input prompt
-            system_prompt: Optional system prompt/instruction
-            max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature (0.0 to 1.0)
+            prompt: The input prompt for generation
+            system_prompt: Optional system instruction/context
+            max_tokens: Maximum tokens to generate (num_predict)
+            temperature: Sampling temperature (0.0-1.0, lower = more deterministic)
+            top_k: Top-k sampling parameter
+            top_p: Nucleus sampling threshold
 
         Returns:
-            Dictionary with response data and metadata
+            Dictionary with keys:
+                - success (bool): Whether generation succeeded
+                - response (str): Generated text (if success=True)
+                - model (str): Model name used
+                - generation_time (float): Time taken in seconds
+                - tokens_generated (int): Approximate token count
+                - metadata (dict): Generation parameters
+                - error (str): Error message (if success=False)
+                - error_type (str): Exception type (if success=False)
+
+        Raises:
+            OllamaException: After max retries exhausted
         """
         start_time: float = time.time()
 
         try:
+            self.logger.debug(
+                f"Generating response with {self.model_name} "
+                f"(temp={temperature}, max_tokens={max_tokens})"
+            )
+
             with tqdm(total=2, desc="Generating response", leave=False) as pbar:
                 pbar.set_description("Sending request to model")
 
+                # Call Ollama
                 result = ollama.generate(
                     model=self.model_name,
-                    system_prompt=system_prompt,
+                    system=system_prompt,
                     prompt=prompt,
                     options={
                         "temperature": temperature,
@@ -98,7 +248,28 @@ class PromptAndObtain:
                 pbar.set_description("Processing response")
                 generation_time: float = time.time() - start_time
                 response_text: str = result.get("response", "")
+
+                # Validate response is not empty
+                if not response_text.strip():
+                    raise OllamaResponseException(
+                        message="Empty response from model",
+                        model_name=self.model_name,
+                        response_preview="",
+                        expected_format="non-empty text"
+                    )
+
                 pbar.update(1)
+
+            # Success metrics
+            record_metric('llm.generation.success', 1, model=self.model_name)
+            record_metric('llm.generation.time', generation_time, model=self.model_name)
+            record_metric('llm.tokens.generated', len(response_text.split()),
+                          model=self.model_name)
+
+            self.logger.debug(
+                f"Generation completed in {generation_time:.2f}s "
+                f"({len(response_text)} chars)"
+            )
 
             return {
                 "success": True,
@@ -108,6 +279,7 @@ class PromptAndObtain:
                 "tokens_generated": len(response_text.split()),
                 "metadata": {
                     "prompt_length": len(prompt),
+                    "system_prompt_length": len(system_prompt) if system_prompt else 0,
                     "temperature": temperature,
                     "top_k": top_k,
                     "top_p": top_p,
@@ -115,12 +287,94 @@ class PromptAndObtain:
                 }
             }
 
-        except Exception as e:
+        except OllamaException as e:
+            # Our custom exceptions - already properly formatted
+            generation_time = time.time() - start_time
+
+            self.logger.error(
+                f"Generation failed with OllamaException: {e.message}",
+                extra={'custom_fields': e.details}
+            )
+
+            record_metric('llm.generation.failure', 1,
+                          model=self.model_name,
+                          error_type=type(e).__name__)
+
             return {
                 "success": False,
-                "error": str(e),
-                "generation_time": time.time() - start_time
+                "error": e.message,
+                "error_type": type(e).__name__,
+                "error_details": e.to_dict(),
+                "generation_time": generation_time,
+                "model": self.model_name
             }
+
+        except Exception as e:
+            # Unexpected exceptions - translate to OllamaException
+            generation_time = time.time() - start_time
+
+            self.logger.error(f"Generation failed with unexpected error: {e}", exc_info=True)
+            record_metric('llm.generation.failure', 1,
+                          model=self.model_name,
+                          error_type=type(e).__name__)
+
+            # Try to classify the error
+            error_str = str(e).lower()
+
+            if "not found" in error_str or "does not exist" in error_str:
+                translated = OllamaModelNotLoadedException(self.model_name)
+            elif "timeout" in error_str or "timed out" in error_str:
+                translated = OllamaTimeoutException(
+                    model_name=self.model_name,
+                    timeout_seconds=generation_time,
+                    operation="generate"
+                )
+            elif "memory" in error_str or "out of memory" in error_str:
+                translated = OllamaMemoryException.from_system_info(self.model_name)
+            elif "connection" in error_str or "connect" in error_str:
+                translated = OllamaConnectionException(original_error=e)
+            else:
+                # Generic wrapper
+                translated = OllamaException(
+                    message=f"Generation failed: {type(e).__name__}",
+                    model_name=self.model_name,
+                    details={
+                        'error': str(e),
+                        'generation_time': generation_time,
+                        'traceback': traceback.format_exc()
+                    }
+                )
+
+            return {
+                "success": False,
+                "error": translated.message,
+                "error_type": type(translated).__name__,
+                "error_details": translated.to_dict(),
+                "generation_time": generation_time,
+                "model": self.model_name,
+                "original_error": str(e)
+            }
+
+    def test_generation(self, test_prompt: str = "Test") -> bool:
+        """
+        Quick test to verify model can generate.
+
+        Args:
+            test_prompt: Simple prompt for testing
+
+        Returns:
+            True if generation succeeds, False otherwise
+        """
+        try:
+            result = self.generate_response(
+                prompt=test_prompt,
+                max_tokens=10,
+                temperature=0.1
+            )
+            return result.get("success", False)
+        except Exception as e:
+            self.logger.warning(f"Test generation failed: {e}")
+            return False
 
 class ModelCapabilityDetector:
     """Detect model capabilities via 'ollama show' and tune parameters accordingly"""
@@ -537,7 +791,8 @@ class ModelChain:
             'final': None,
             'confidence': 0.0,
             'stages_used': [],
-            'timings': {}
+            'timings': {},
+            'fallback_used': False
         }
 
         # STAGE 1: Primary extraction
@@ -600,66 +855,60 @@ class ModelChain:
 
             self.logger.info(f"Stage 2: Validation with {self.validation_model}")
 
-            # Get tuned parameters for validation model
-            validation_params = self.detector.tune_parameters(
-                self.validation_model,
-                use_case='validation'
-            )
-
-            # Create temporary support instance for validation
             validation_support = PromptAndObtain(self.validation_model)
-
             try:
-                # Create validation prompt
-                validation_prompt = self._create_validation_prompt(
-                    original_extraction=primary_data,
-                    context=context
+                # validation_support = PromptAndObtain(self.validation_model)
+                validation_params = self.detector.tune_parameters(
+                    self.validation_model, use_case='validation'
                 )
 
-                validation_start = time.time()
+                validation_prompt = self._create_validation_prompt(
+                    primary_data, context
+                )
+
                 validation_result = validation_support.generate_response(
                     prompt=validation_prompt,
                     system_prompt=system_prompt,
-                    max_tokens=validation_params['max_tokens'],
-                    temperature=validation_params['temperature']
+                    **validation_params
                 )
-                validation_time = time.time() - validation_start
-                results['timings']['validation_generation'] = validation_time
+
                 results['validation'] = validation_result
                 results['stages_used'].append('validation')
 
-                self.logger.info(f"Validation completed in {validation_time:.2f}s")
-
                 if validation_result.get('success'):
-                    try:
-                        validation_data = self._parse_json_response(
-                            validation_result['response']
-                        )
-                        results['validation']['parsed_data'] = validation_data
+                    validation_data = self._parse_json_response(
+                        validation_result['response']
+                    )
+                    results['final'] = self._merge_extractions(
+                        primary_data, validation_data
+                    )
+                    results['confidence'] = 0.95
+                    self.logger.info("✓ Validation succeeded - high confidence")
 
-                        # Merge results (validation takes precedence)
-                        results['final'] = self._merge_extractions(
-                            primary_data,
-                            validation_data
-                        )
-                        results['confidence'] = 0.95  # High confidence with validation
-                        self.logger.info("Validation successful, high confidence result")
-
-                    except Exception as e:
-                        self.logger.warning(f"Validation parsing failed: {e}")
-                        results['final'] = primary_data
-                        results['confidence'] = 0.7  # Fallback to primary
                 else:
-                    self.logger.warning("Validation generation failed")
+                    # Validation failed but primary succeeded
+                    self.logger.warning("Validation failed - using primary only")
                     results['final'] = primary_data
                     results['confidence'] = 0.7
+                    results['fallback_used'] = True
+
+            except Exception as e:
+                # Validation CRASHED - fallback to primary
+                self.logger.error(
+                    f"Validation stage crashed: {e} - using primary extraction",
+                    exc_info=True
+                )
+                results['final'] = primary_data
+                results['confidence'] = 0.7
+                results['fallback_used'] = True
 
             finally:
-                # CRITICAL: Cleanup validation model
-                validation_support.cleanup()
-                del validation_support
+                try:
+                    validation_support.cleanup()
+                    del validation_support
+                except:
+                    pass
                 gc.collect()
-                self.logger.info("Validation model cleaned up, memory freed")
 
         else:
             # No validation needed
