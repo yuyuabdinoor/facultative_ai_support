@@ -23,7 +23,7 @@ from typing import Dict, Any, Optional, List, Tuple, Type, Callable
 import ollama
 import psutil
 from pathlib import Path
-from pydantic import BaseModel, Field, validator, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 from config import SUPPORTED_EXTENSIONS, MODEL_PATHS
 
@@ -2061,12 +2061,14 @@ class ProcessingMetrics(BaseModel):
 
 
 class DateRange(BaseModel):
-    """Date range with validation"""
+
+    model_config = ConfigDict(validate_assignment=True)
+
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     raw_text: str = Field(..., min_length=1)
 
-    @model_validator(mode='after')  # Add mode='after' parameter
+    @model_validator(mode='after')
     def validate_date_order(self) -> 'DateRange':
         """Ensure start date is before end date"""
         if self.start_date and self.end_date and self.start_date > self.end_date:
@@ -2081,7 +2083,10 @@ class DateRange(BaseModel):
 
 
 class MonetaryAmount(BaseModel):
-    """Monetary amount with currency"""
+    """Monetary amount with currency """
+
+    model_config = ConfigDict(validate_assignment=True)
+
     amount: Optional[float] = Field(None, ge=0)
     currency: Optional[str] = Field(None, description="Currency code or symbol")
     raw_text: str = Field(..., min_length=1)
@@ -2090,7 +2095,7 @@ class MonetaryAmount(BaseModel):
     @classmethod
     def validate_reasonable_amount(cls, v: Optional[float]) -> Optional[float]:
         """Validate amount is within reasonable bounds"""
-        if v is not None and v > 1e15:  # 1 quadrillion
+        if v is not None and v > 1e15:
             raise ValueError(f"Amount {v} exceeds reasonable bounds")
         return v
 
@@ -2102,7 +2107,10 @@ class MonetaryAmount(BaseModel):
 
 
 class PercentageValue(BaseModel):
-    """Percentage value with validation"""
+    """Percentage value with validation """
+
+    model_config = ConfigDict(validate_assignment=True)
+
     value: Optional[float] = Field(None, ge=0, le=100)
     raw_text: str = Field(..., min_length=1)
 
@@ -2196,36 +2204,11 @@ class ReinsuranceExtraction(BaseModel):
     @classmethod
     def normalize_currency(cls, v):
         """Normalize currency to uppercase ISO code if possible"""
-
         if not v or v == "TBD":
             return v
-        # If 3 letters, uppercase it
         if len(v) == 3 and v.isalpha():
             return v.upper()
-        return v  # Keep symbols unchanged
-
-    @field_validator('total_sum_insured_float')
-    @classmethod
-    def validate_tsi_currency_consistency(cls, v, values):
-        """Ensure TSI has associated currency if numeric value present"""
-        if v is not None and v > 0:
-            currency = values.get('currency')
-            if not currency or currency == "TBD":
-                # Log warning but don't fail validation
-                pass
         return v
-
-    @model_validator(mode='after')
-    def validate_financial_consistency(cls, values):
-        """Validate financial fields for consistency"""
-        tsi_str = values.get('total_sum_insured', 'TBD')
-        tsi_float = values.get('total_sum_insured_float')
-
-        # If we have numeric TSI but string is TBD, update string
-        if tsi_float and tsi_float > 0 and tsi_str == "TBD":
-            values['total_sum_insured'] = str(tsi_float)
-
-        return values
 
     @field_validator('*', mode='before')
     @classmethod
@@ -2235,33 +2218,139 @@ class ReinsuranceExtraction(BaseModel):
             return "TBD"
         return v
 
+    @model_validator(mode='after')
+    def validate_financial_consistency(self) -> 'ReinsuranceExtraction':
+        """
+        Validate financial fields for consistency.
+        """
+        logger = logging.getLogger(__name__)
+
+        try:
+            # 1. Check TSI string vs numeric consistency
+            tsi_str = self.total_sum_insured
+            tsi_float = self.total_sum_insured_float
+
+            # If we have numeric TSI but string is TBD, update string
+            if tsi_float and tsi_float > 0 and tsi_str == "TBD":
+                self.total_sum_insured = str(tsi_float)
+
+            # 2. Check TSI has currency
+            if tsi_float and tsi_float > 0:
+                if not self.currency or self.currency == "TBD":
+                    logger.warning(
+                        f"TSI has numeric value ({tsi_float}) but currency is missing or TBD."
+                    )
+
+                    # Try to extract currency from TSI string
+                    if tsi_str and tsi_str != "TBD":
+                        extracted_currency = self._try_extract_currency(tsi_str)
+                        if extracted_currency:
+                            self.currency = extracted_currency
+                            logger.info(f"Extracted currency from TSI string: {extracted_currency}")
+
+            # 3. Validate percentage fields
+            self._validate_percentages(logger)
+
+        except Exception as e:
+            logger.warning(f"Financial consistency validation warning: {e}")
+            # Don't fail validation - just log the issue
+
+        return self
+
+    def _try_extract_currency(self, text: str) -> Optional[str]:
+        """Try to extract currency from a text string."""
+        import re
+
+        if not text:
+            return None
+
+        # Try ISO codes (3 uppercase letters)
+        code_match = re.search(r'\b([A-Z]{3})\b', text)
+        if code_match:
+            return code_match.group(1)
+
+        # Try currency symbols
+        symbol_match = re.search(r'[$€£¥₹₩₪฿¢]', text)
+        if symbol_match:
+            return symbol_match.group(0)
+
+        return None
+
+    def _validate_percentages(self, logger):
+        """Validate that retention + share_offered don't exceed 100%"""
+        try:
+            retention_str = self.retention_of_cedant
+            share_str = self.share_offered
+
+            if retention_str == "TBD" or share_str == "TBD":
+                return
+
+            retention_val = self._parse_percentage(retention_str)
+            share_val = self._parse_percentage(share_str)
+
+            if retention_val is not None and share_val is not None:
+                total = retention_val + share_val
+
+                if total > 100:
+                    logger.warning(
+                        f"Retention ({retention_val}%) + Share ({share_val}%) = {total}% exceeds 100%"
+                    )
+                elif total < 100:
+                    logger.info(
+                        f"Retention ({retention_val}%) + Share ({share_val}%) = {total}% (undersubscribed)"
+                    )
+        except Exception as e:
+            logger.debug(f"Could not validate percentages: {e}")
+
+    def _parse_percentage(self, text: str) -> Optional[float]:
+        """Parse percentage from string like '25%' or '25' or '0.25'"""
+        import re
+
+        if not text or text == "TBD":
+            return None
+
+        try:
+            cleaned = text.replace('%', '').strip()
+            value = float(cleaned)
+
+            if 0 < value < 1:
+                value = value * 100
+
+            return value
+        except:
+            return None
+
     def to_dict_clean(self) -> Dict[str, Any]:
         """Export as dictionary, excluding None and metadata"""
-        data = self.dict(exclude_none=True, exclude={'extraction_timestamp'})
-        return data
+        return self.model_dump(
+            exclude_none=True,
+            exclude={'extraction_timestamp'},
+            mode='json'
+        )
 
     def get_completeness_score(self) -> float:
         """
         Calculate completeness score (0-100) based on filled fields.
-
-        Returns:
-            Percentage of non-TBD fields
         """
-        all_fields = self.dict(exclude={'extraction_confidence', 'extraction_timestamp'})
-        total_fields = len(all_fields)
-        filled_fields = sum(1 for v in all_fields.values() if v not in [None, "TBD", ""])
+        all_fields = self.model_dump(
+            exclude={'extraction_confidence', 'extraction_timestamp'},
+            mode='json'
+        )
 
+        total_fields = len(all_fields)
         if total_fields == 0:
             return 0.0
+
+        # Count non-empty fields
+        filled_fields = sum(
+            1 for v in all_fields.values()
+            if v not in [None, "TBD", "", 0, 0.0]
+        )
 
         return (filled_fields / total_fields) * 100
 
     def get_missing_critical_fields(self) -> List[str]:
-        """
-        Return list of critical fields that are missing.
-
-        Critical fields: insured, cedant, total_sum_insured, period_of_insurance
-        """
+        """Return list of critical fields that are missing."""
         critical_fields = {
             'insured': self.insured,
             'cedant': self.cedant,
